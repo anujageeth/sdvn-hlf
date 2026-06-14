@@ -4,8 +4,8 @@ SPDX-License-Identifier: Apache-2.0
 pqc.go wraps the post-quantum primitives used *inside* the chaincode.
 
 The paper requires CRYSTALS-Dilithium (ML-DSA, FIPS 204) for non-repudiation
-everywhere a vehicle/controller/peer signs (Eq 3.41/3.42/3.49/3.50/3.51/3.55)
-and SHA3-256 for message-integrity hashing (Eq 3.18/3.53/3.54/3.56).
+everywhere a vehicle/controller/peer signs (Eq 3.40/3.44/3.45/3.55/3.58/3.59/3.70)
+and SHA3-256 for message-integrity hashing (Eq 3.18/3.65/3.66/3.71/3.73).
 
 Only *verification* and *hashing* live on-chain — they are deterministic and
 therefore safe to run on every endorsing peer. Key generation, Kyber (ML-KEM)
@@ -25,7 +25,7 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// SHA3 returns the SHA3-256 digest of data (Eq 3.18/3.53/3.54/3.56).
+// SHA3 returns the SHA3-256 digest of data (Eq 3.18/3.65/3.66/3.71/3.73).
 func SHA3(data []byte) []byte {
 	h := sha3.Sum256(data)
 	return h[:]
@@ -37,7 +37,7 @@ func SHA3Hex(data []byte) string {
 	return hex.EncodeToString(SHA3(data))
 }
 
-// DilithiumVerify realizes Dilithium.Verify(pk, msg, sig) (Eq 3.42).
+// DilithiumVerify realizes Dilithium.Verify(pk, msg, sig) (Eq 3.45).
 //
 // It returns true iff sig is a valid ML-DSA-65 signature over msg under the
 // public key encoded in pkBytes. An empty context string is used, matching the
