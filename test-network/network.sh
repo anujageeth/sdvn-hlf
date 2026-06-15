@@ -459,6 +459,31 @@ function networkDown() {
   if [ "$MODE" != "restart" ]; then
     # Bring down the network, deleting the volumes
     ${CONTAINER_CLI} volume rm docker_orderer.example.com docker_peer0.org1.example.com docker_peer0.org2.example.com
+    
+    # --- CUSTOM AGGRESSIVE CLEANUP FOR ALL DYNAMIC ORGS (Org3, Org4, etc.) ---
+    for org_dir in addOrg*; do
+      if [ -d "$org_dir" ]; then
+        # Extract the organization number from the folder name
+        ORG_NUM=$(echo "$org_dir" | grep -o -E '[0-9]+')
+        infoln "Aggressively cleaning up Org$ORG_NUM..."
+        
+        # Force kill specific containers for that org
+        ${CONTAINER_CLI} rm -f peer0.org${ORG_NUM}.example.com couchdb${ORG_NUM} 2>/dev/null
+        
+        # Force delete all associated volumes
+        ${CONTAINER_CLI} volume rm $(${CONTAINER_CLI} volume ls -q | grep org${ORG_NUM}) 2>/dev/null
+        ${CONTAINER_CLI} volume rm $(${CONTAINER_CLI} volume ls -q | grep couchdb${ORG_NUM}) 2>/dev/null
+        
+        # Delete generated certificates and artifacts inside the org folder
+        sudo rm -rf ${org_dir}/organizations/peerOrganizations 2>/dev/null
+        sudo rm -rf ${org_dir}/channel-artifacts/* 2>/dev/null
+        
+        # Clean up Fabric CA artifacts for this org
+        sudo rm -rf ${org_dir}/fabric-ca/org${ORG_NUM}/msp ${org_dir}/fabric-ca/org${ORG_NUM}/tls-cert.pem ${org_dir}/fabric-ca/org${ORG_NUM}/ca-cert.pem ${org_dir}/fabric-ca/org${ORG_NUM}/IssuerPublicKey ${org_dir}/fabric-ca/org${ORG_NUM}/IssuerRevocationPublicKey ${org_dir}/fabric-ca/org${ORG_NUM}/fabric-ca-server.db 2>/dev/null
+      fi
+    done
+    # -------------------------------------------------------------------------
+
     #Cleanup the chaincode containers
     clearContainers
     #Cleanup images
@@ -469,7 +494,7 @@ function networkDown() {
     ${CONTAINER_CLI} run --rm -v "$(pwd):/data" busybox sh -c 'cd /data && rm -rf organizations/fabric-ca/org1/msp organizations/fabric-ca/org1/tls-cert.pem organizations/fabric-ca/org1/ca-cert.pem organizations/fabric-ca/org1/IssuerPublicKey organizations/fabric-ca/org1/IssuerRevocationPublicKey organizations/fabric-ca/org1/fabric-ca-server.db'
     ${CONTAINER_CLI} run --rm -v "$(pwd):/data" busybox sh -c 'cd /data && rm -rf organizations/fabric-ca/org2/msp organizations/fabric-ca/org2/tls-cert.pem organizations/fabric-ca/org2/ca-cert.pem organizations/fabric-ca/org2/IssuerPublicKey organizations/fabric-ca/org2/IssuerRevocationPublicKey organizations/fabric-ca/org2/fabric-ca-server.db'
     ${CONTAINER_CLI} run --rm -v "$(pwd):/data" busybox sh -c 'cd /data && rm -rf organizations/fabric-ca/ordererOrg/msp organizations/fabric-ca/ordererOrg/tls-cert.pem organizations/fabric-ca/ordererOrg/ca-cert.pem organizations/fabric-ca/ordererOrg/IssuerPublicKey organizations/fabric-ca/ordererOrg/IssuerRevocationPublicKey organizations/fabric-ca/ordererOrg/fabric-ca-server.db'
-    ${CONTAINER_CLI} run --rm -v "$(pwd):/data" busybox sh -c 'cd /data && rm -rf addOrg3/fabric-ca/org3/msp addOrg3/fabric-ca/org3/tls-cert.pem addOrg3/fabric-ca/org3/ca-cert.pem addOrg3/fabric-ca/org3/IssuerPublicKey addOrg3/fabric-ca/org3/IssuerRevocationPublicKey addOrg3/fabric-ca/org3/fabric-ca-server.db'
+    
     # remove channel and script artifacts
     ${CONTAINER_CLI} run --rm -v "$(pwd):/data" busybox sh -c 'cd /data && rm -rf channel-artifacts log.txt *.tar.gz'
   fi
