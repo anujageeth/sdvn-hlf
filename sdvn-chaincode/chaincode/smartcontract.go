@@ -2,11 +2,11 @@
 SPDX-License-Identifier: Apache-2.0
 
 smartcontract.go implements the SMDAC Shared-Trust-Substrate chaincode
-(Section 3.3.5 of the project paper). It realises the application-level layer of
-the two-layer endorsement model: Fabric's native k-of-n endorsement policy
-provides the ">= k independent peers" guarantee of Eq 3.49, while the
-per-call Dilithium verification below provides per-vehicle/controller
-non-repudiation (Eq 3.41/3.42/3.50/3.51/3.55).
+(Section 3.3.5 of the project paper, Eqs 3.55-3.74). It realises the
+application-level layer of the two-layer endorsement model: Fabric's native
+BFT k-of-n endorsement policy provides the ">= k independent peers" guarantee of
+Eq 3.55 (threshold Eq 3.56), while the per-call Dilithium verification below
+provides per-vehicle/controller non-repudiation (Eq 3.44/3.45/3.58/3.59/3.70).
 
 Every function here is deterministic: it only verifies signatures, hashes,
 reads/writes world state and compares values. All non-deterministic work
@@ -19,6 +19,7 @@ the functions below.
 package chaincode
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -41,15 +42,28 @@ func (s *SmartContract) InitLedger(ctx contractapi.TransactionContextInterface) 
 }
 
 // =====================================================================================
-// Vehicle identity & trust (Eq 3.50, 3.52, 3.55; Algo 3)
+// Vehicle identity & trust (Eq 3.58, 3.60, 3.70; Algo 4/5)
 // =====================================================================================
 
-// RegisterVehicle realises tx_reg (Eq 3.55). It is a direct V2BC operation that
+// RegisterVehicle realises tx_reg (Eq 3.70). It is a direct V2BC operation that
 // bypasses the controller: it verifies the Dilithium signature over
 // (pkD_i || t_reg), stores the VehicleIdentity in L_BC and initialises the
 // vehicle's trust score to a neutral value.
 func (s *SmartContract) RegisterVehicle(ctx contractapi.TransactionContextInterface,
-	id string, dilithiumPK []byte, kyberPK []byte, tReg int64, regSig []byte) error {
+	id string, dilithiumPKB64 string, kyberPKB64 string, tReg int64, regSigB64 string) error {
+
+	dilithiumPK, err := base64.StdEncoding.DecodeString(dilithiumPKB64)
+	if err != nil {
+		return fmt.Errorf("invalid Dilithium public key for vehicle %s: %w", id, err)
+	}
+	kyberPK, err := base64.StdEncoding.DecodeString(kyberPKB64)
+	if err != nil {
+		return fmt.Errorf("invalid Kyber public key for vehicle %s: %w", id, err)
+	}
+	regSig, err := base64.StdEncoding.DecodeString(regSigB64)
+	if err != nil {
+		return fmt.Errorf("invalid registration signature for vehicle %s: %w", id, err)
+	}
 
 	if id == "" {
 		return fmt.Errorf("vehicle id must not be empty")
@@ -103,14 +117,26 @@ func (s *SmartContract) VehicleExists(ctx contractapi.TransactionContextInterfac
 	return s.entityExists(ctx, prefixVehicle+id)
 }
 
-// EvaluateVehicleAC realises AC(v_i, op) (Eq 3.50):
+// EvaluateVehicleAC realises AC(v_i, op) (Eq 3.58):
 //
 //	AC = Dilithium.Verify(pkD_i, m_i, sigma_i) AND T(v_i) >= tau_min AND v_i in L_BC
 //
 // It returns false (not an error) when the vehicle is unknown/revoked or any
 // condition fails, so callers can branch directly on the boolean result.
 func (s *SmartContract) EvaluateVehicleAC(ctx contractapi.TransactionContextInterface,
-	id string, msg []byte, sig []byte, tauMin float64) (bool, error) {
+	id string, msgB64 string, sigB64 string) (bool, error) { // REMOVED tauMin float64
+
+	msg, err := base64.StdEncoding.DecodeString(msgB64)
+	if err != nil {
+		return false, fmt.Errorf("invalid message payload for vehicle %s: %w", id, err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil {
+		return false, fmt.Errorf("invalid signature for vehicle %s: %w", id, err)
+	}
+
+	cfg, err := s.getSystemConfig(ctx)
+	if err != nil { return false, err }
 
 	var v VehicleIdentity
 	ok, err := getJSON(ctx, prefixVehicle+id, &v)
@@ -132,12 +158,12 @@ func (s *SmartContract) EvaluateVehicleAC(ctx contractapi.TransactionContextInte
 	if !ok {
 		return false, nil
 	}
-	return t.Score >= tauMin, nil
+		return t.Score >= cfg.TauMin, nil // Uses governed threshold
 }
 
-// UpdateTrustScore realises the EMA trust update (Eq 3.52):
+// UpdateTrustScore realises the vehicle EMA trust update (Eq 3.60):
 //
-//	T^{t+1} = lambda*T^t + (1-lambda)*1[ S_comp < theta_adapt ]
+//	T^{t+1}(v_i) = lambda*T^t(v_i) + (1-lambda)*1[ S_comp < theta_adapt ]
 //
 // belowThreshold carries the indicator 1[S_comp < theta_adapt]; passing true
 // keeps trust high (benign), false degrades it (detection).
@@ -175,8 +201,8 @@ func (s *SmartContract) GetTrustScore(ctx contractapi.TransactionContextInterfac
 	return &t, nil
 }
 
-// RevokeVehicle realises tx_rev (Algorithm 3). It marks the identity revoked and
-// drives the trust score to zero, recording both on-chain.
+// RevokeVehicle realises tx_rev (Algorithm 4/5). It marks the identity revoked
+// and drives the trust score to zero, recording both on-chain.
 func (s *SmartContract) RevokeVehicle(ctx contractapi.TransactionContextInterface, id string, ts int64) error {
 	v, err := s.ReadVehicle(ctx, id)
 	if err != nil {
@@ -201,14 +227,19 @@ func (s *SmartContract) RevokeVehicle(ctx contractapi.TransactionContextInterfac
 }
 
 // =====================================================================================
-// Message-integrity (Eq 3.18, 3.56) and audit logging (Eq 3.53/3.54)
+// Message-integrity (Eq 3.18, 3.71) and audit logging (Eq 3.65/3.66)
 // =====================================================================================
 
-// SubmitMessageHash realises CID^m_i (Eq 3.56). This is a direct V2BC operation
+// SubmitMessageHash realises CID^m_i (Eq 3.71). This is a direct V2BC operation
 // that bypasses the controller, establishing the tamper-evident ground truth
 // {SHA3-256(m_i), sigma_i, ts, CID} against which VerifyMessageIntegrity checks.
 func (s *SmartContract) SubmitMessageHash(ctx contractapi.TransactionContextInterface,
-	id string, ts int64, cidM string, hash string, sig []byte) error {
+	id string, ts int64, cidM string, hash string, sigB64 string) error {
+
+	sig, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil {
+		return fmt.Errorf("invalid message signature for vehicle %s: %w", id, err)
+	}
 
 	rec := MessageHashRecord{
 		DocType: DocTypeMsgHash,
@@ -247,7 +278,7 @@ func (s *SmartContract) VerifyMessageIntegrity(ctx contractapi.TransactionContex
 	return rec.Hash != forwardedHash, nil
 }
 
-// WriteAuditLog realises the IPFS+chain audit write (Eq 3.53/3.54). The off-chain
+// WriteAuditLog realises the IPFS+chain audit write (Eq 3.65/3.66). The off-chain
 // app pins L_i to >= n_pin IPFS nodes and passes the returned CID + SHA3-256(L_i)
 // here; the on-chain hash lets any peer later verify the IPFS content.
 func (s *SmartContract) WriteAuditLog(ctx contractapi.TransactionContextInterface,
@@ -262,7 +293,7 @@ func (s *SmartContract) WriteAuditLog(ctx contractapi.TransactionContextInterfac
 }
 
 // =====================================================================================
-// Flow-rule cross-verification (Eq 3.57) and phantom-identity detection (Eq 3.23)
+// Flow-rule cross-verification (Eq 3.72) and phantom-identity detection (Eq 3.23)
 // =====================================================================================
 
 // RegisterFlowRule stores an endorsed flow-table entry (a FlowRuleRecord) that
@@ -278,7 +309,7 @@ func (s *SmartContract) RegisterFlowRule(ctx contractapi.TransactionContextInter
 	return putJSON(ctx, key, rec)
 }
 
-// CrossVerifyFlowRule realises XV (Eq 3.57): XV = 1 iff the installed flow rule
+// CrossVerifyFlowRule realises XV (Eq 3.72): XV = 1 iff the installed flow rule
 // for v_i matches one of the endorsed FlowRuleRecords on-chain. XV = 0 is a
 // CC-DIM indicator (controller installed a rule absent from the ledger).
 func (s *SmartContract) CrossVerifyFlowRule(ctx contractapi.TransactionContextInterface,
@@ -333,16 +364,33 @@ func (s *SmartContract) DetectPhantomIdentities(ctx contractapi.TransactionConte
 }
 
 // =====================================================================================
-// Controller key & legitimacy (Eq 3.24, 3.51) and CC-signature persistence (Eq 3.22-3.25)
+// Controller key & legitimacy (Eq 3.24, 3.59) and CC-signature persistence (Eq 3.22-3.26)
 // =====================================================================================
 
 // RegisterControllerKey stores pk^{L_BC}_ctrl plus the northbound-API baseline
-// (mu_NB, sigma_NB) (Eq 3.24/3.51).
+// (mu_NB, sigma_NB) (Eq 3.24/3.59). It also seeds a neutral controller trust
+// record (Eq 3.61) so that the standby/re-admission guards have a value to read.
 func (s *SmartContract) RegisterControllerKey(ctx contractapi.TransactionContextInterface,
-	ctrlID string, pkLBC []byte, muNB float64, sigmaNB float64) error {
+	ctrlID string, pkLBCB64 string, muNB float64, sigmaNB float64) error {
+
+	pkLBC, err := base64.StdEncoding.DecodeString(pkLBCB64)
+	if err != nil {
+		return fmt.Errorf("invalid controller public key %s: %w", ctrlID, err)
+	}
 
 	ck := ControllerKey{DocType: DocTypeCtrlKey, CtrlID: ctrlID, PKLBC: pkLBC, MuNB: muNB, SigmaNB: sigmaNB}
-	return putJSON(ctx, prefixCtrlKey+ctrlID, ck)
+	if err := putJSON(ctx, prefixCtrlKey+ctrlID, ck); err != nil {
+		return err
+	}
+
+	// Seed a neutral, non-isolated trust record if none exists yet (Eq 3.61).
+	if exists, err := s.entityExists(ctx, prefixCtrlTrust+ctrlID); err != nil {
+		return err
+	} else if !exists {
+		ct := ControllerTrust{DocType: DocTypeCtrlTrust, CtrlID: ctrlID, Score: neutralTrust}
+		return putJSON(ctx, prefixCtrlTrust+ctrlID, ct)
+	}
+	return nil
 }
 
 // GetControllerKey returns the registered controller key record.
@@ -359,34 +407,47 @@ func (s *SmartContract) GetControllerKey(ctx contractapi.TransactionContextInter
 }
 
 // RecordCCSignatures persists the aggregated controller-compromise scores
-// S^ctrl_CC-{TA,EA,SI,DIM} (Eq 3.22-3.25) that the application computed off-chain
-// from the IPFS logs, for use by EvaluateControllerAC.
+// S^ctrl_CC-{TA,EA,SI,DIM} (Eq 3.22-3.25) together with the extended composite
+// S^ext_comp (Eq 3.26), all computed off-chain by the application plane from the
+// IPFS logs. The composite is supplied explicitly rather than summed on-chain
+// because Eq 3.26 weights each signature (w5-w8) and the CC-TA term is the
+// IPFS-augmented score of Eq 3.68 — neither of which is a plain sum. The stored
+// composite is read by EvaluateControllerAC (Eq 3.59) and the controller trust
+// update (Eq 3.61).
 func (s *SmartContract) RecordCCSignatures(ctx contractapi.TransactionContextInterface,
-	ctrlID string, t int64, sccTA float64, sccEA float64, sccSI float64, sccDIM float64) error {
+	ctrlID string, t int64, sccTA float64, sccEA float64, sccSI float64, sccDIM float64, composite float64) error {
 
 	rec := CCSignatureRecord{
-		DocType:  DocTypeCCSig,
-		CtrlID:   ctrlID,
-		T:        t,
-		SccTA:    sccTA,
-		SccEA:    sccEA,
-		SccSI:    sccSI,
-		SccDIM:   sccDIM,
-		SccTotal: sccTA + sccEA + sccSI + sccDIM,
+		DocType:   DocTypeCCSig,
+		CtrlID:    ctrlID,
+		T:         t,
+		SccTA:     sccTA,
+		SccEA:     sccEA,
+		SccSI:     sccSI,
+		SccDIM:    sccDIM,
+		Composite: composite,
 	}
 	return putJSON(ctx, prefixCCSig+ctrlID, rec)
 }
 
-// EvaluateControllerAC realises AC(ctrl, op) (Eq 3.51):
+// EvaluateControllerAC realises AC(ctrl, op) (Eq 3.59):
 //
 //	AC = S^ctrl_CC < theta_CC AND pk_used = pk^{L_BC}_ctrl AND |E_NB| < mu_NB + 3 sigma_NB
 //
 // pkUsed is the Dilithium key the controller currently signs with; eNB is the
-// observed northbound-API call count in the window. The aggregated S^ctrl_CC and
-// (mu_NB, sigma_NB) baseline are read from the on-chain records, never from the
-// (possibly compromised) controller.
+// observed northbound-API call count in the window. The aggregated composite
+// S^ext_comp (Eq 3.26) and (mu_NB, sigma_NB) baseline are read from the on-chain
+// records, never from the (possibly compromised) controller.
 func (s *SmartContract) EvaluateControllerAC(ctx contractapi.TransactionContextInterface,
-	ctrlID string, pkUsed []byte, eNB float64, thetaCC float64) (bool, error) {
+	ctrlID string, pkUsedB64 string, eNB float64) (bool, error) { // REMOVED thetaCC float64
+
+	pkUsed, err := base64.StdEncoding.DecodeString(pkUsedB64)
+	if err != nil {
+		return false, fmt.Errorf("invalid controller key usage payload for %s: %w", ctrlID, err)
+	}
+
+	cfg, err := s.getSystemConfig(ctx)
+	if err != nil { return false, err }
 
 	var ck ControllerKey
 	ok, err := getJSON(ctx, prefixCtrlKey+ctrlID, &ck)
@@ -407,10 +468,10 @@ func (s *SmartContract) EvaluateControllerAC(ctx contractapi.TransactionContextI
 		cc = CCSignatureRecord{}
 	}
 
-	// Condition 1: S^ctrl_CC < theta_CC.
-	if cc.SccTotal >= thetaCC {
+	// Condition 1: S^ctrl_CC (extended composite, Eq 3.26) < theta_CC.
+	if cc.Composite >= cfg.ThetaCC {
 		return false, nil
-	}
+		} // Uses governed threshold
 	// Condition 2: pk_used = pk^{L_BC}_ctrl (Eq 3.24 key-mismatch check).
 	if !bytesEqual(pkUsed, ck.PKLBC) {
 		return false, nil
@@ -418,27 +479,45 @@ func (s *SmartContract) EvaluateControllerAC(ctx contractapi.TransactionContextI
 	// Condition 3: |E_NB| < mu_NB + 3 sigma_NB.
 	if eNB >= ck.MuNB+3*ck.SigmaNB {
 		return false, nil
-	}
+	}	
 	return true, nil
 }
 
 // =====================================================================================
-// DRL mitigation actions (Algorithm 5: a6/a7/a8; Algorithm 1 rekey)
+// DRL mitigation actions (Algorithm 6: a6/a7/a8; Algorithm 1 rekey)
 // =====================================================================================
 
-// ActivateStandbyController realises tx_fail (Algorithm 5, action a6): the
-// endorsed standby-controller handoff. The new controller key is registered and
-// the event is recorded as an incident.
+// ActivateStandbyController realises tx_fail (Algorithm 6, action a6): the
+// endorsed standby-controller handoff.
+//
+// Per Eq 3.63 the standby must be PRE-REGISTERED in L_BC (via RegisterControllerKey,
+// a separate setup transaction) — activation never installs a fresh key, which
+// would let an attacker substitute an unvetted controller. The handoff therefore:
+//
+//  1. evaluates GuardStandbyController(standby) (Eq 3.63);
+//  2. on success, marks the compromised primary isolated (sets t_isolate, Eq 3.64);
+//  3. records the incident on-chain.
+//
+// All of this is endorsed under EP(tx)=⊤ (Eq 3.55), so no single peer/controller
+// can unilaterally trigger or suppress a failover.
 func (s *SmartContract) ActivateStandbyController(ctx contractapi.TransactionContextInterface,
-	standbyCtrlID string, standbyPK []byte, muNB float64, sigmaNB float64, t int64, cid string, hash string) error {
+	primaryCtrlID string, standbyCtrlID string, t int64, cid string, hash string) error { // REMOVED tauCtrl float64
 
-	if err := s.RegisterControllerKey(ctx, standbyCtrlID, standbyPK, muNB, sigmaNB); err != nil {
+	ok, err := s.GuardStandbyController(ctx, standbyCtrlID) // Removed tauCtrl argument
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("standby controller %s failed the activation guard (Eq 3.63)", standbyCtrlID)
+	}
+
+	if err := s.setControllerIsolated(ctx, primaryCtrlID, true, t); err != nil {
 		return err
 	}
 	return s.LogIncident(ctx, t, "a6", cid, hash, 0, 0, 0, 0)
 }
 
-// ReRegisterVehicles realises tx_rereg (Algorithm 5, action a6): re-register the
+// ReRegisterVehicles realises tx_rereg (Algorithm 6, action a6): re-register the
 // given blockchain-verified vehicles to the standby controller. Only ids already
 // present and non-revoked in L_BC are accepted; the returned slice lists them.
 func (s *SmartContract) ReRegisterVehicles(ctx contractapi.TransactionContextInterface,
@@ -467,7 +546,7 @@ func (s *SmartContract) ReRegisterVehicles(ctx contractapi.TransactionContextInt
 	return reregistered, nil
 }
 
-// FlowTablePurge realises tx_purge (Algorithm 5, action a7): replace the flow
+// FlowTablePurge realises tx_purge (Algorithm 6, action a7): replace the flow
 // table with ledger-endorsed entries only. The caller passes its installed
 // flow-table entries as a JSON string array; this returns the subset that is
 // endorsed on-chain (the purged-down table).
@@ -495,8 +574,8 @@ func (s *SmartContract) FlowTablePurge(ctx contractapi.TransactionContextInterfa
 	return kept, nil
 }
 
-// LogIncident / RecordDRLAction realise the immutable DRL-action record
-// (Algorithm 1 & 5, including a8 API lockdown and Eq 3.40 rekey logging).
+// LogIncident realises the immutable DRL-action record (Algorithm 1 & 6,
+// including a8 northbound-API lockdown and Eq 3.66 / Algo 1 rekey logging).
 func (s *SmartContract) LogIncident(ctx contractapi.TransactionContextInterface,
 	t int64, action string, cid string, hash string, ner float64, der float64, pfer float64, rfr float64) error {
 
@@ -518,11 +597,275 @@ func (s *SmartContract) LogIncident(ctx contractapi.TransactionContextInterface,
 	return putJSON(ctx, key, rec)
 }
 
-// RecordRekey logs an Algorithm-1 PQC re-key event: only the new group-key hash
-// and the IPFS CID are stored on-chain (Eq 3.40, Algo 1 lines 13-15).
+// RecordRekey logs an Algorithm-1 DKG broadcast re-key event: only the new
+// group-key hash SHA3-256(K_G') and the IPFS CID are stored on-chain
+// (Algorithm 1 line 17, committed under EP(tx)=⊤ Eq 3.55).
 func (s *SmartContract) RecordRekey(ctx contractapi.TransactionContextInterface,
 	t int64, groupKeyHash string, cid string) error {
 	return s.LogIncident(ctx, t, "rekey", cid, groupKeyHash, 0, 0, 0, 0)
+}
+
+// =====================================================================================
+// Controller dynamic trust (Eq 3.61/3.62) and standby/re-admission guards (Eq 3.63/3.64)
+// =====================================================================================
+
+// UpdateControllerTrustScore realises the controller EMA trust update (Eq 3.61):
+//
+//	T^{t+1}(ctrl) = lambda*T^t(ctrl) + (1-lambda)*1[ S^ctrl_CC < theta_CC ]
+//
+// The indicator is NOT supplied by the (possibly compromised) controller: it is
+// derived here from the on-chain CC composite recorded by RecordCCSignatures,
+// so the score accumulates evidence purely from L_BC / N_pin audit data
+// (Eq 3.62). Re-run by each endorsing peer every monitoring interval Delta.
+func (s *SmartContract) UpdateControllerTrustScore(ctx contractapi.TransactionContextInterface,
+	ctrlID string, lambda float64, ts int64) error { // REMOVED thetaCC float64
+
+	cfg, err := s.getSystemConfig(ctx)
+	if err != nil { return err }
+
+	ct, ok, err := s.getControllerTrust(ctx, ctrlID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		ct = ControllerTrust{DocType: DocTypeCtrlTrust, CtrlID: ctrlID, Score: neutralTrust}
+	}
+
+	// Indicator 1[ S^ctrl_CC < theta_CC ] from the on-chain composite (Eq 3.26).
+	ind := 0.0
+	var cc CCSignatureRecord
+	hasCC, err := getJSON(ctx, prefixCCSig+ctrlID, &cc)
+	if err != nil {
+		return err
+	}
+	if !hasCC || cc.Composite < cfg.ThetaCC { // Uses governed threshold
+		ind = 1.0 // no anomaly recorded, or composite below threshold => benign
+	}
+
+	ct.Score = lambda*ct.Score + (1-lambda)*ind
+	ct.Updated = ts
+	return putJSON(ctx, prefixCtrlTrust+ctrlID, ct)
+}
+
+// GetControllerTrustScore returns the current controller trust record.
+func (s *SmartContract) GetControllerTrustScore(ctx contractapi.TransactionContextInterface, ctrlID string) (*ControllerTrust, error) {
+	ct, ok, err := s.getControllerTrust(ctx, ctrlID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("controller trust for %s does not exist", ctrlID)
+	}
+	return &ct, nil
+}
+
+// GuardStandbyController realises the standby activation guard (Eq 3.63):
+//
+//	Guard = pk_standby in L_BC AND T(ctrl_standby) >= tau_ctrl AND S^standby_CC = 0
+//
+// It returns false (not an error) when any condition fails so the caller can
+// branch on the boolean. A standby that is itself isolated, untrusted, or has any
+// recorded CC anomaly cannot take over a compromised primary.
+func (s *SmartContract) GuardStandbyController(ctx contractapi.TransactionContextInterface,
+	standbyCtrlID string) (bool, error) { // REMOVED tauCtrl float64
+
+	cfg, err := s.getSystemConfig(ctx)
+	if err != nil { return false, err }
+
+	// Condition 1: pk_standby in L_BC (controller key pre-registered).
+	if ok, err := s.entityExists(ctx, prefixCtrlKey+standbyCtrlID); err != nil {
+		return false, err
+	} else if !ok {
+		return false, nil
+	}
+
+	// Condition 2: T(ctrl_standby) >= tau_ctrl and the standby is not isolated.
+	ct, ok, err := s.getControllerTrust(ctx, standbyCtrlID)
+	if err != nil {
+		return false, err
+	}
+	if !ok || ct.Isolated || ct.Score < cfg.TauCtrl { // Uses governed threshold
+		return false, nil
+	}
+
+	// Condition 3: S^standby_CC = 0 (no CC anomaly recorded against the standby).
+	var cc CCSignatureRecord
+	hasCC, err := getJSON(ctx, prefixCCSig+standbyCtrlID, &cc)
+	if err != nil {
+		return false, err
+	}
+	if hasCC && cc.Composite != 0 {
+		return false, nil
+	}
+	return true, nil
+}
+
+// ReadmitController realises the controller re-admission predicate (Eq 3.64):
+//
+//	Readmit = (t_now - t_isolate >= T_excl) AND Guard(ctrl)=⊤ AND T(ctrl) >= tau_ctrl
+//
+// On success it clears the isolation flag so the controller may rejoin; on
+// failure it leaves the controller isolated and returns false. The mandatory
+// exclusion window T_excl and trust bootstrapping reuse GuardStandbyController.
+func (s *SmartContract) ReadmitController(ctx contractapi.TransactionContextInterface,
+	ctrlID string, tNow int64, tExcl int64) (bool, error) { // REMOVED tauCtrl float64
+
+	ct, ok, err := s.getControllerTrust(ctx, ctrlID)
+	if err != nil {
+		return false, err
+	}
+	if !ok || !ct.Isolated {
+		return false, fmt.Errorf("controller %s is not currently isolated", ctrlID)
+	}
+
+	// Condition 1: mandatory exclusion window elapsed.
+	if tNow-ct.IsolateTime < tExcl {
+		return false, nil
+	}
+	// Conditions 2-3: same bootstrapping guard as a standby AND T(ctrl) >= tau_ctrl.
+	guardOK, err := s.GuardStandbyController(ctx, ctrlID) // Removed tauCtrl argument
+	if err != nil {
+		return false, err
+	}
+	if !guardOK {
+		return false, nil
+	}
+
+	// Re-admit: clear isolation.
+	ct.Isolated = false
+	ct.IsolateTime = 0
+	ct.Updated = tNow
+	if err := putJSON(ctx, prefixCtrlTrust+ctrlID, ct); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// =====================================================================================
+// IPFS availability protection (Eq 3.67/3.69)
+// =====================================================================================
+
+// RecordIPFSAvailability realises the IPFS availability ratio (Eq 3.67):
+//
+//	Q_IPFS(t) = |{ n in N_pin : reachable }| / n_pin
+//
+// The application plane on each peer measures reachability independently of the
+// controller and submits the counts here. The record is flagged Degraded when
+// Q_IPFS(t) < Q_th — a controller degrading its own evidence source is itself a
+// CC indicator (Eq 3.68). The latest record is also written to a singleton key so
+// EvaluateConservativeFailover can read it without scanning.
+func (s *SmartContract) RecordIPFSAvailability(ctx contractapi.TransactionContextInterface,
+	t int64, reachablePins int, nPin int) (*IPFSAvailabilityRecord, error) { // REMOVED qTh float64
+
+	cfg, err := s.getSystemConfig(ctx)
+	if err != nil { return nil, err }
+
+	if nPin <= 0 {
+		return nil, fmt.Errorf("nPin must be positive")
+	}
+	if reachablePins < 0 || reachablePins > nPin {
+		return nil, fmt.Errorf("reachablePins (%d) must be within [0, nPin=%d]", reachablePins, nPin)
+	}
+
+	q := float64(reachablePins) / float64(nPin)
+	rec := IPFSAvailabilityRecord{
+		DocType:       DocTypeIPFSAvail,
+		T:             t,
+		QIPFS:         q,
+		ReachablePins: reachablePins,
+		NPin:          nPin,
+		Degraded:      q < cfg.QTh, // Uses governed threshold
+	}
+
+	key, err := ctx.GetStub().CreateCompositeKey(DocTypeIPFSAvail, []string{strconv.FormatInt(t, 10)})
+	if err != nil {
+		return nil, err
+	}
+	if err := putJSON(ctx, key, rec); err != nil {
+		return nil, err
+	}
+	// Singleton "latest" pointer for EvaluateConservativeFailover (Eq 3.69).
+	if err := putJSON(ctx, singletonIPFSAvail, rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// EvaluateConservativeFailover realises the conservative-failover trigger
+// (Eq 3.69):
+//
+//	Failover(t) = 1[ Q_IPFS < Q_th AND T_stale > T_cache^max ]
+//
+// Q_IPFS is read from the latest on-chain availability record (Eq 3.67); T_stale
+// (seconds since the last successful peer-cache update) and T_cache^max are
+// supplied by the caller. A true result forces the DRL agent to select a6
+// (controller isolation) regardless of P_CC confidence.
+func (s *SmartContract) EvaluateConservativeFailover(ctx contractapi.TransactionContextInterface,
+	tStale int64, tCacheMax int64) (bool, error) { // REMOVED qTh float64
+
+	cfg, err := s.getSystemConfig(ctx)
+	if err != nil { return false, err }
+
+	var rec IPFSAvailabilityRecord
+	ok, err := getJSON(ctx, singletonIPFSAvail, &rec)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		// No measurement yet => no evidence of IPFS degradation, no failover.
+		return false, nil
+	}
+	return rec.QIPFS < cfg.QTh && tStale > tCacheMax, nil // Uses governed threshold
+}
+
+// =====================================================================================
+// Chaincode-integrity governance (Eq 3.73/3.74)
+// =====================================================================================
+
+// CommitChaincodeHash realises the chaincode integrity commitment (Eq 3.73):
+//
+//	H_CC = SHA3-256(chaincode bytes), committed under EP(tx)=⊤.
+//
+// hccHex is the SHA3-256 hex digest of the deployed chaincode bytes (computed at
+// build/deploy time). It is committed exactly once: a second commit is rejected
+// so the anchored reference cannot be overwritten without a governance upgrade.
+func (s *SmartContract) CommitChaincodeHash(ctx contractapi.TransactionContextInterface,
+	hccHex string, t int64) error {
+
+	if hccHex == "" {
+		return fmt.Errorf("chaincode hash must not be empty")
+	}
+	exists, err := s.entityExists(ctx, singletonCChash)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("chaincode hash already committed; use a governance upgrade to change it")
+	}
+	rec := ChaincodeHash{DocType: DocTypeCChash, HCC: hccHex, CommitTime: t}
+	return putJSON(ctx, singletonCChash, rec)
+}
+
+// VerifyChaincodeIntegrity realises the per-peer integrity check (Eq 3.74):
+//
+//	V_CC(p_j) = 1[ SHA3-256(running code) = H_CC ]
+//
+// Each peer computes the SHA3-256 of its running chaincode off-chain and submits
+// the hex digest here; a mismatch (V_CC=0) is a CC-DIM indicator and the peer
+// must be excluded from the endorsement quorum until re-verified. Returns true
+// iff the running-code hash matches the committed H_CC.
+func (s *SmartContract) VerifyChaincodeIntegrity(ctx contractapi.TransactionContextInterface,
+	runningHashHex string) (bool, error) {
+
+	var rec ChaincodeHash
+	ok, err := getJSON(ctx, singletonCChash, &rec)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("no committed chaincode hash; call CommitChaincodeHash first (Eq 3.73)")
+	}
+	return runningHashHex == rec.HCC, nil
 }
 
 // =====================================================================================
@@ -588,6 +931,35 @@ func (s *SmartContract) entityExists(ctx contractapi.TransactionContextInterface
 	return b != nil, nil
 }
 
+// getControllerTrust loads the ControllerTrust record for ctrlID. The bool
+// reports whether the record existed.
+func (s *SmartContract) getControllerTrust(ctx contractapi.TransactionContextInterface, ctrlID string) (ControllerTrust, bool, error) {
+	var ct ControllerTrust
+	ok, err := getJSON(ctx, prefixCtrlTrust+ctrlID, &ct)
+	return ct, ok, err
+}
+
+// setControllerIsolated flips the isolation flag on a controller's trust record,
+// stamping t_isolate (Eq 3.64) when isolating. A missing record is created so a
+// primary that was never explicitly trust-seeded can still be isolated.
+func (s *SmartContract) setControllerIsolated(ctx contractapi.TransactionContextInterface, ctrlID string, isolated bool, t int64) error {
+	ct, ok, err := s.getControllerTrust(ctx, ctrlID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		ct = ControllerTrust{DocType: DocTypeCtrlTrust, CtrlID: ctrlID, Score: neutralTrust}
+	}
+	ct.Isolated = isolated
+	if isolated {
+		ct.IsolateTime = t
+	} else {
+		ct.IsolateTime = 0
+	}
+	ct.Updated = t
+	return putJSON(ctx, prefixCtrlTrust+ctrlID, ct)
+}
+
 func putJSON(ctx contractapi.TransactionContextInterface, key string, v interface{}) error {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -634,4 +1006,36 @@ func prefixRangeEnd(prefix string) string {
 		}
 	}
 	return "" // open-ended (prefix was all 0xff)
+}
+
+// =====================================================================================
+// System Security Threshold Governance
+// =====================================================================================
+
+// SetSystemConfig establishes the global security thresholds. This must be invoked 
+// by the network administrators under the EP(tx)=T policy.
+func (s *SmartContract) SetSystemConfig(ctx contractapi.TransactionContextInterface,
+	tauMin, thetaCC, tauCtrl, qTh float64) error {
+	
+	cfg := SystemConfig{
+		DocType: DocTypeSysConfig,
+		TauMin:  tauMin,
+		ThetaCC: thetaCC,
+		TauCtrl: tauCtrl,
+		QTh:     qTh,
+	}
+	return putJSON(ctx, singletonSysConfig, cfg)
+}
+
+// getSystemConfig is an internal helper to fetch the immutable thresholds.
+func (s *SmartContract) getSystemConfig(ctx contractapi.TransactionContextInterface) (*SystemConfig, error) {
+	var cfg SystemConfig
+	ok, err := getJSON(ctx, singletonSysConfig, &cfg)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("system configuration not initialized; call SetSystemConfig first")
+	}
+	return &cfg, nil
 }

@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDilithiumVerify checks that DilithiumVerify (Eq 3.42) accepts a genuine
+// TestDilithiumVerify checks that DilithiumVerify (Eq 3.45) accepts a genuine
 // ML-DSA-65 signature and rejects a tampered message and a malformed key.
 //
 // It uses circl's stable sign.Scheme interface to generate keys and sign, then

@@ -2,12 +2,13 @@
 SPDX-License-Identifier: Apache-2.0
 
 assets.go defines the world-state assets for the SMDAC framework
-(Section 3.3.5, Figs 3.13/3.14/3.17 of the project paper).
+(Section 3.3.5, Figs 3.13/3.14/3.17 of the project paper, Eqs 3.55-3.74).
 
-The ledger holds the Identity Ledger (L_BC), Trust Scores, Controller keys,
-Message-hash records, Flow-rule records and audit/incident logs. Each struct
+The ledger holds the Identity Ledger (L_BC), vehicle/controller trust scores,
+controller keys, message-hash records, flow-rule records, audit/incident logs,
+IPFS-availability records and the committed chaincode-integrity hash. Each struct
 carries a DocType so that CouchDB rich queries can diff identity sets
-(Eq 3.23 DetectPhantomIdentities, Eq 3.57 CrossVerifyFlowRule).
+(Eq 3.23 DetectPhantomIdentities, Eq 3.72 CrossVerifyFlowRule).
 
 Struct fields are kept in a fixed order with explicit JSON tags so marshalling
 is deterministic across every endorsing peer.
@@ -20,28 +21,42 @@ const (
 	DocTypeVehicle    = "vehicle"
 	DocTypeTrust      = "trust"
 	DocTypeCtrlKey    = "ctrlkey"
+	DocTypeCtrlTrust  = "ctrltrust"
 	DocTypeMsgHash    = "msghash"
 	DocTypeFlowRule   = "flowrule"
 	DocTypeAudit      = "audit"
 	DocTypeIncident   = "incident"
 	DocTypeCCSig      = "ccsig"
+	DocTypeIPFSAvail  = "ipfsavail"
+	DocTypeCChash     = "cchash"
 )
 
 // Key prefixes keep the different asset families in disjoint key-spaces so a
 // range scan over one prefix never returns assets of another type.
 const (
-	prefixVehicle  = "vehicle_"
-	prefixTrust    = "trust_"
-	prefixCtrlKey  = "ctrlkey_"
-	prefixMsgHash  = "msghash_"
-	prefixFlowRule = "flowrule_"
-	prefixAudit    = "audit_"
-	prefixIncident = "incident_"
-	prefixCCSig    = "ccsig_"
+	prefixVehicle   = "vehicle_"
+	prefixTrust     = "trust_"
+	prefixCtrlKey   = "ctrlkey_"
+	prefixCtrlTrust = "ctrltrust_"
+	prefixMsgHash   = "msghash_"
+	prefixFlowRule  = "flowrule_"
+	prefixAudit     = "audit_"
+	prefixIncident  = "incident_"
+	prefixCCSig     = "ccsig_"
+	prefixIPFSAvail = "ipfsavail_"
+	prefixCChash    = "cchash_"
 )
 
+// singletonIPFSAvail keys the most-recent IPFS-availability record so that
+// EvaluateConservativeFailover (Eq 3.69) can read Q_IPFS(t) without scanning.
+const singletonIPFSAvail = prefixIPFSAvail + "latest"
+
+// singletonCChash keys the (single) committed chaincode-integrity hash H_CC
+// (Eq 3.73). There is exactly one deployed chaincode per channel.
+const singletonCChash = prefixCChash + "current"
+
 // VehicleIdentity is the on-chain identity record `pkD_i` stored in L_BC by the
-// direct, controller-independent registration transaction (Eq 3.55, tx_reg).
+// direct, controller-independent registration transaction (Eq 3.70, tx_reg).
 type VehicleIdentity struct {
 	DocType     string `json:"docType"`     // "vehicle"
 	ID          string `json:"id"`          // pseudonym ID_i
@@ -49,10 +64,10 @@ type VehicleIdentity struct {
 	KyberPK     []byte `json:"kyberPK"`     // pk^Kyber_i (ML-KEM public key)
 	TReg        int64  `json:"tReg"`        // registration timestamp t_reg
 	RegSig      []byte `json:"regSig"`      // Dilithium.Sign(skD_i, pkD_i || t_reg)
-	Revoked     bool   `json:"revoked"`     // set by RevokeVehicle (Algo 3, tx_rev)
+	Revoked     bool   `json:"revoked"`     // set by RevokeVehicle (Algo 4/5, tx_rev)
 }
 
-// TrustScore is the per-vehicle EMA trust value T(v_i) (Eq 3.52).
+// TrustScore is the per-vehicle EMA trust value T(v_i) (Eq 3.60).
 type TrustScore struct {
 	DocType string  `json:"docType"` // "trust"
 	ID      string  `json:"id"`      // v_i
@@ -61,7 +76,7 @@ type TrustScore struct {
 }
 
 // ControllerKey holds the registered controller key `pk^{L_BC}_ctrl` plus the
-// northbound-API statistical baseline (mu_NB, sigma_NB) (Eq 3.24/3.51).
+// northbound-API statistical baseline (mu_NB, sigma_NB) (Eq 3.24/3.59).
 type ControllerKey struct {
 	DocType string  `json:"docType"` // "ctrlkey"
 	CtrlID  string  `json:"ctrlId"`
@@ -70,8 +85,21 @@ type ControllerKey struct {
 	SigmaNB float64 `json:"sigmaNB"` // northbound baseline std-dev
 }
 
+// ControllerTrust is the per-controller EMA trust value T(ctrl) (Eq 3.61) plus
+// the isolation state used by the standby/re-admission guards (Eq 3.63/3.64).
+// It is re-evaluated every interval Delta from L_BC / N_pin only (Eq 3.62),
+// never from controller-reported state.
+type ControllerTrust struct {
+	DocType     string  `json:"docType"`     // "ctrltrust"
+	CtrlID      string  `json:"ctrlId"`
+	Score       float64 `json:"score"`       // T(ctrl)
+	Isolated    bool    `json:"isolated"`    // true after action a6 (Algo 6)
+	IsolateTime int64   `json:"isolateTime"` // t_isolate (Eq 3.64)
+	Updated     int64   `json:"updated"`     // last update timestamp
+}
+
 // MessageHashRecord is the direct V2BC message-hash submission `CID^m_i`
-// (Eq 3.56). It is the ground truth that VerifyMessageIntegrity (Eq 3.18)
+// (Eq 3.71). It is the ground truth that VerifyMessageIntegrity (Eq 3.18)
 // compares the controller-forwarded message against.
 type MessageHashRecord struct {
 	DocType string `json:"docType"` // "msghash"
@@ -83,7 +111,7 @@ type MessageHashRecord struct {
 }
 
 // FlowRuleRecord is an endorsed flow-table entry used for cross-verification
-// (Eq 3.57, XV). Installed rules absent from this set indicate CC-DIM.
+// (Eq 3.72, XV). Installed rules absent from this set indicate CC-DIM.
 type FlowRuleRecord struct {
 	DocType string `json:"docType"` // "flowrule"
 	ID      string `json:"id"`      // v_i
@@ -92,7 +120,7 @@ type FlowRuleRecord struct {
 }
 
 // AuditLog records `{v_i, t, CID_i, SHA3-256(L_i)}` for detection / DRL-action
-// logs (Eq 3.53/3.54). The on-chain hash lets any peer verify the IPFS content.
+// logs (Eq 3.65/3.66). The on-chain hash lets any peer verify the IPFS content.
 type AuditLog struct {
 	DocType string `json:"docType"` // "audit"
 	ID      string `json:"id"`      // v_i
@@ -102,8 +130,8 @@ type AuditLog struct {
 }
 
 // IncidentLog is the immutable record of a DRL mitigation action
-// (Algorithm 5, actions a6/a7/a8 and rekey logging Eq 3.40) plus optional CC
-// impact metrics.
+// (Algorithm 6, actions a6/a7/a8 and rekey logging Algo 1) plus optional CC
+// impact metrics (NER/DER/PFER/RFR, RQ6).
 type IncidentLog struct {
 	DocType string  `json:"docType"` // "incident"
 	T       int64   `json:"t"`       // action time
@@ -117,15 +145,54 @@ type IncidentLog struct {
 }
 
 // CCSignatureRecord persists the aggregated controller-compromise scores
-// S^ctrl_CC-{TA,EA,SI,DIM} computed off-chain from IPFS logs (Eq 3.22-3.25),
-// read by EvaluateControllerAC (Eq 3.51).
+// S^ctrl_CC-{TA,EA,SI,DIM} computed off-chain from IPFS logs (Eq 3.22-3.25) plus
+// the extended composite S^ext_comp (Eq 3.26, incorporating the IPFS-augmented
+// CC-TA term of Eq 3.68). Read by EvaluateControllerAC (Eq 3.59) and the
+// controller trust update (Eq 3.61).
 type CCSignatureRecord struct {
-	DocType  string  `json:"docType"` // "ccsig"
-	CtrlID   string  `json:"ctrlId"`
-	T        int64   `json:"t"`
-	SccTA    float64 `json:"sccTA"`  // S^ctrl_CC-TA (Eq 3.22)
-	SccEA    float64 `json:"sccEA"`  // S^ctrl_CC-EA (Eq 3.25)
-	SccSI    float64 `json:"sccSI"`  // S^ctrl_CC-SI (Eq 3.23)
-	SccDIM   float64 `json:"sccDIM"` // S^ctrl_CC-DIM (Eq 3.24, 0 or 1)
-	SccTotal float64 `json:"sccTotal"`
+	DocType   string  `json:"docType"` // "ccsig"
+	CtrlID    string  `json:"ctrlId"`
+	T         int64   `json:"t"`
+	SccTA     float64 `json:"sccTA"`     // S^ctrl_CC-TA (Eq 3.22 / augmented 3.68)
+	SccEA     float64 `json:"sccEA"`     // S^ctrl_CC-EA (Eq 3.25)
+	SccSI     float64 `json:"sccSI"`     // S^ctrl_CC-SI (Eq 3.23)
+	SccDIM    float64 `json:"sccDIM"`    // S^ctrl_CC-DIM (Eq 3.24, 0 or 1)
+	Composite float64 `json:"composite"` // S^ext_comp (Eq 3.26), computed off-chain
+}
+
+// IPFSAvailabilityRecord stores the availability ratio Q_IPFS(t) measured by the
+// application plane on each peer (Eq 3.67). A drop below Q_th is itself a
+// controller-compromise indicator (Eq 3.68) and drives conservative failover
+// (Eq 3.69).
+type IPFSAvailabilityRecord struct {
+	DocType       string  `json:"docType"`       // "ipfsavail"
+	T             int64   `json:"t"`             // measurement time
+	QIPFS         float64 `json:"qIPFS"`         // Q_IPFS(t) in [0,1]
+	ReachablePins int     `json:"reachablePins"` // |{n in N_pin : reachable}|
+	NPin          int     `json:"nPin"`          // n_pin (required pin count)
+	Degraded      bool    `json:"degraded"`      // Q_IPFS(t) < Q_th
+}
+
+// ChaincodeHash is the committed integrity reference H_CC = SHA3-256(chaincode
+// bytes) (Eq 3.73). Peers verify their running code against it (Eq 3.74).
+type ChaincodeHash struct {
+	DocType    string `json:"docType"`    // "cchash"
+	HCC        string `json:"hcc"`        // SHA3-256(chaincode bytes) (hex)
+	CommitTime int64  `json:"commitTime"` // commit timestamp
+}
+
+// System configurations - For global thresholds of the ledger
+const (
+	DocTypeSysConfig   = "sysconfig"
+	singletonSysConfig = prefixTrust + "sysconfig_current" // Safe singleton key
+)
+
+// SystemConfig holds global security thresholds governed by the BFT peer set.
+// This prevents a compromised controller from manipulating thresholds via function arguments.
+type SystemConfig struct {
+	DocType string  `json:"docType"` // "sysconfig"
+	TauMin  float64 `json:"tauMin"`  // Minimum vehicle trust threshold
+	ThetaCC float64 `json:"thetaCC"` // CC anomaly composite threshold
+	TauCtrl float64 `json:"tauCtrl"` // Minimum controller trust threshold
+	QTh     float64 `json:"qTh"`     // Minimum IPFS availability ratio
 }
