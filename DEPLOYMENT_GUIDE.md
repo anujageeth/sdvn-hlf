@@ -22,6 +22,7 @@ docker volume prune -f
 
 # 5. Clear any dangling Docker networks
 docker network prune -f
+docker rmi $(docker images dev-* -q)
 
 # 6. Clean the Chaincode Directory and re-vendor dependencies
 cd ../sdvn-chaincode
@@ -150,12 +151,40 @@ peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetAllVehicles","Ar
 peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetControllerTrustScore","Args":["CTRL_01"]}'
 ```
 
+### Retrieve the message hashes related to a specific vehicle:
+```bash
+peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetMessageHistory","Args":["<VEHICLE_ID>"]}'
+```
+
 ### Verify a Cross-Channel Message Hash:
 ```bash
 peer chaincode query -C mychannel -n sdvncc -c '{"function":"VerifyMessageIntegrity","Args":["V_200", "1718500100", "hash_of_message_abc"]}'
 ```
 
-## Step 7: Clean Teardown
+## Step 7: Connect with NS3 Simulation:
+*An intermediate Node.js REST API gateway is used to bridge the simulation and the blockchain.*
+
+### Initialize the API Wallet and Admin Credentials:
+```bash
+cd ~/hlf/fabric-samples/fabric-rest-api
+node enrollAdmin.js
+```
+Expected Output: A success message confirming the admin identity has been enrolled and the wallet/admin.id file has been generated.
+
+### Start the API Gateway:
+```bash
+node app.js
+```
+Expected Output: `SDVN Blockchain REST API Gateway listening on port 3000`
+(Leave this terminal running in the background).
+
+### Execute the NS-3 Simulation:
+```bash
+cd ~/ns-allinone-3.35/ns-3.35
+./waf --run scratch/DCA
+```
+
+## Step 8: Clean Teardown
 *When you are finished testing, bring the network down gracefully.*
 
 ```bash
