@@ -180,3 +180,19 @@ type ChaincodeHash struct {
 	HCC        string `json:"hcc"`        // SHA3-256(chaincode bytes) (hex)
 	CommitTime int64  `json:"commitTime"` // commit timestamp
 }
+
+// System configurations - For global thresholds of the ledger
+const (
+	DocTypeSysConfig   = "sysconfig"
+	singletonSysConfig = prefixTrust + "sysconfig_current" // Safe singleton key
+)
+
+// SystemConfig holds global security thresholds governed by the BFT peer set.
+// This prevents a compromised controller from manipulating thresholds via function arguments.
+type SystemConfig struct {
+	DocType string  `json:"docType"` // "sysconfig"
+	TauMin  float64 `json:"tauMin"`  // Minimum vehicle trust threshold
+	ThetaCC float64 `json:"thetaCC"` // CC anomaly composite threshold
+	TauCtrl float64 `json:"tauCtrl"` // Minimum controller trust threshold
+	QTh     float64 `json:"qTh"`     // Minimum IPFS availability ratio
+}
