@@ -56,11 +56,71 @@ k = ⌊2nₚ/3⌋ + 1            f = ⌊(nₚ−1)/3⌋
 **Consequence vs. the previous deployment:** the old `OutOf(2, …)` on 3 orgs
 (`k=2`) no longer satisfies **Eq 3.56** — it tolerates a *minority* approval and
 provides `f=0`. The revised model requires `nₚ ≥ 4, k=3` to tolerate a single
-compromised/Byzantine peer (including a peer co-located with the SDN controller).
+compromised/Byzantine peer.
+
+> **Controller is a pure client (no peer).** The SDN controller runs **no Fabric
+> peer** and is **never** part of the peer set `P`. It connects to the network
+> only as a Gateway **client identity** (MSP role `client`), with transaction-
+> submission rights and **zero** endorsement, ledger-hosting, or chaincode-install
+> authority. Consequently a compromised controller cannot endorse, cannot reach
+> the `k`-of-`nₚ` quorum, and cannot alter the trusted set or the security
+> thresholds (both are bound to `P` by state-based endorsement — see *Runtime
+> trust-based peer selection* below). The controller's only on-chain footprint is
+> the transactions it submits, every one of which is independently re-verified by
+> `P` and never taken as trusted input.
 
 The **ordering service** is a *separate* node set `O`, disjoint from `P`, running
 crash-fault-tolerant **Raft** with quorum `|O| ≥ 2f_O+1`, `f_O=⌊(|O|−1)/2⌋`
 (**Eq 3.57**). Use **3 or 5 orderers**, never the single default orderer.
+
+---
+
+## Runtime trust-based peer selection (`peerselect.go`)
+
+Rather than pinning **every** node as an endorsing peer — which is computationally
+expensive and suboptimal — the endorsing set `P` is the **trusted subset** of
+nodes, (re)selected *occasionally at runtime* by ranking on-chain node trust
+scores `T(pⱼ)`. This is realised entirely on-chain in
+[`chaincode/peerselect.go`](chaincode/peerselect.go).
+
+**Node trust signal.** `RegisterPeerNode` seeds a neutral trust record per
+candidate peer org (keyed by MSP id, e.g. `Org3MSP`); `UpdatePeerTrustScore`
+applies the same EMA rule as the vehicle score (**Eq 3.60**) using a per-interval
+well-behaved indicator (e.g. the peer endorsed honestly and passed `V_CC=1`,
+**Eq 3.74**). Misbehaving nodes decay out of the next selection.
+
+**Bootstrap (trust just initialized).** Because every `T(pⱼ)` starts at the
+neutral value, trust-ranking is meaningless at `t=0`. The substrate is seeded
+**once** via `SeedEndorserSet`, in either mode:
+
+| `bySel` | Meaning |
+|---|---|
+| `all-seed` | **everyone** is a peer initially |
+| `ta-seed` | a **trusted-authority**-chosen subset is the initial peer set |
+
+**Runtime re-selection.** `ReselectEndorsers(nPeers, epoch, ts)` — re-run every
+interval `Δ` — ranks all registered nodes by `T(pⱼ)` (descending, MSP-id
+tie-break for deterministic write-sets across endorsers), takes the top `nPeers`
+as the new `P`, and sizes the BFT threshold `k = ⌊2|P|/3⌋+1` (**Eq 3.56**).
+
+**Enforcement (state-based endorsement).** Each (re)selection binds the
+endorser-set singleton **and** the `SystemConfig` key with a `k`-of-`n`
+**state-based endorsement (SBE)** policy over the selected MSPs (built as a
+`SignaturePolicyEnvelope` in `buildThresholdEP`). So changing the trusted set or
+the security thresholds requires a BFT quorum of the **currently** trusted peers —
+and the next `ReselectEndorsers` is itself gated by the previous selection's
+policy, so no single node (and no controller) can hijack the selection. The
+application/gateway plane reads `GetActiveEndorserSet` to route endorsement
+proposals only to the trusted peers (and an admin refreshes the committed
+chaincode `--ccep` to match `P` at the next governance window).
+
+| Function | Purpose |
+|---|---|
+| `RegisterPeerNode` / `GetPeerTrustScore` / `GetAllPeerTrust` | Seed & read node trust `T(pⱼ)` |
+| `UpdatePeerTrustScore` | EMA node-trust update (**Eq 3.60** form) |
+| `SeedEndorserSet` | One-time bootstrap (`all-seed` / `ta-seed`) |
+| `ReselectEndorsers` | Periodic top-`nPeers` trust selection + BFT `k` + SBE re-bind |
+| `GetActiveEndorserSet` | Current `P`, `k`, `n` for gateway routing / EP refresh |
 
 ---
 
@@ -74,6 +134,7 @@ sdvn-chaincode/
     ├── assets.go               # world-state structs (§"World-state assets" below)
     ├── pqc.go                  # Dilithium verify + SHA3-256 (Eq 3.40 / 3.45 / 3.65)
     ├── pqc_test.go             # unit tests for the crypto helpers
+    ├── peerselect.go           # runtime trust-based peer selection + BFT SBE (Eq 3.55/3.56)
     └── smartcontract.go        # all SMDAC chaincode functions (table below)
 ```
 
@@ -317,9 +378,22 @@ Deploy with the BFT supermajority endorsement policy (`k = ⌊2nₚ/3⌋+1`). Fo
 
 `OutOf(k, …)` is the BFT threshold of **Eq 3.55/3.56** at the Fabric layer — the
 single most important flag for the paper's guarantee that *no single compromised
-peer (including one co-located with the controller) can unilaterally write*. With
-`k=3, nₚ=4` the network tolerates **f=1** Byzantine peer. Scale up by copying
-`addOrgN/` with bumped ports and recomputing `k` from the table above.
+peer can unilaterally write*. With `k=3, nₚ=4` the network tolerates **f=1**
+Byzantine peer. Scale up by copying `addOrgN/` with bumped ports and recomputing
+`k` from the table above.
+
+> **Post-deploy bootstrap order (matters for the SBE binding).** Run these once,
+> **in this order**, so the state-based endorsement policy never locks out its own
+> first write:
+>
+> 1. `SetSystemConfig` — establish the security thresholds *before* they are bound.
+> 2. `SeedEndorserSet` — `all-seed` (everyone) or `ta-seed` (trusted-authority
+>    subset); this binds the endorser-set and `SystemConfig` keys to `P` via SBE.
+> 3. `CommitChaincodeHash` — anchor `H_CC` (below).
+>
+> Thereafter call `ReselectEndorsers` every interval `Δ` to refresh `P` from node
+> trust, and refresh the committed `--ccep` to match `GetActiveEndorserSet` at the
+> next governance window.
 
 > **Chaincode-governance hardening (Eq 3.73/3.74).** Immediately after deploy,
 > invoke `CommitChaincodeHash` to anchor `H_CC` on-chain, and have peers run

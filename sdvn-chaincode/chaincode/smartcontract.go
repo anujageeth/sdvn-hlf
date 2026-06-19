@@ -99,6 +99,54 @@ func (s *SmartContract) RegisterVehicle(ctx contractapi.TransactionContextInterf
 	return putJSON(ctx, prefixTrust+id, t)
 }
 
+// This function is IDENTICAL to RegisterVehicle except it skips the
+// DilithiumVerify() call. It is called from blockchain_fabric_api.h's
+// bc_RegisterVehicle() via POST /invoke/RegisterVehicleDirectly.
+func (s *SmartContract) RegisterVehicleDirectly(ctx contractapi.TransactionContextInterface,
+	id string, dilithiumPKB64 string, kyberPKB64 string, tReg int64) error {
+
+	if id == "" {
+		return fmt.Errorf("vehicle id must not be empty")
+	}
+
+	// Decode keys (still validates they are valid base64, just not the right length)
+	dilithiumPK, err := base64.StdEncoding.DecodeString(dilithiumPKB64)
+	if err != nil {
+		return fmt.Errorf("invalid Dilithium public key for vehicle %s: %w", id, err)
+	}
+	kyberPK, err := base64.StdEncoding.DecodeString(kyberPKB64)
+	if err != nil {
+		return fmt.Errorf("invalid Kyber public key for vehicle %s: %w", id, err)
+	}
+
+	// Idempotent: if already registered, return success (handles NS-3 retries)
+	exists, err := s.entityExists(ctx, prefixVehicle+id)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil // already registered — treat as success for simulation
+	}
+
+	// Write VehicleIdentity to L_BC without Dilithium proof-of-key-ownership check.
+	v := VehicleIdentity{
+		DocType:     DocTypeVehicle,
+		ID:          id,
+		DilithiumPK: dilithiumPK,
+		KyberPK:     kyberPK,
+		TReg:        tReg,
+		RegSig:      []byte("simulation-no-sig"),
+		Revoked:     false,
+	}
+	if err := putJSON(ctx, prefixVehicle+id, v); err != nil {
+		return err
+	}
+
+	// Initialise trust score to neutral (same as RegisterVehicle, Eq 3.60)
+	t := TrustScore{DocType: DocTypeTrust, ID: id, Score: neutralTrust, Updated: tReg}
+	return putJSON(ctx, prefixTrust+id, t)
+}
+
 // ReadVehicle returns the VehicleIdentity for id, or an error if absent.
 func (s *SmartContract) ReadVehicle(ctx contractapi.TransactionContextInterface, id string) (*VehicleIdentity, error) {
 	var v VehicleIdentity

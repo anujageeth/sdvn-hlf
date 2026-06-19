@@ -18,17 +18,19 @@ package chaincode
 
 // DocType constants used as the `docType` discriminator for CouchDB rich queries.
 const (
-	DocTypeVehicle    = "vehicle"
-	DocTypeTrust      = "trust"
-	DocTypeCtrlKey    = "ctrlkey"
-	DocTypeCtrlTrust  = "ctrltrust"
-	DocTypeMsgHash    = "msghash"
-	DocTypeFlowRule   = "flowrule"
-	DocTypeAudit      = "audit"
-	DocTypeIncident   = "incident"
-	DocTypeCCSig      = "ccsig"
-	DocTypeIPFSAvail  = "ipfsavail"
-	DocTypeCChash     = "cchash"
+	DocTypeVehicle     = "vehicle"
+	DocTypeTrust       = "trust"
+	DocTypeCtrlKey     = "ctrlkey"
+	DocTypeCtrlTrust   = "ctrltrust"
+	DocTypeMsgHash     = "msghash"
+	DocTypeFlowRule    = "flowrule"
+	DocTypeAudit       = "audit"
+	DocTypeIncident    = "incident"
+	DocTypeCCSig       = "ccsig"
+	DocTypeIPFSAvail   = "ipfsavail"
+	DocTypeCChash      = "cchash"
+	DocTypePeerTrust   = "peertrust"
+	DocTypeEndorserSet = "endorserset"
 )
 
 // Key prefixes keep the different asset families in disjoint key-spaces so a
@@ -45,7 +47,16 @@ const (
 	prefixCCSig     = "ccsig_"
 	prefixIPFSAvail = "ipfsavail_"
 	prefixCChash    = "cchash_"
+	prefixPeerTrust = "peertrust_"
 )
+
+// singletonEndorserSet keys the single, current trust-selected endorsing-peer
+// set P (Eq 3.55/3.56). ReselectEndorsers rewrites this record every interval
+// Delta and binds it (plus the SystemConfig key) with a state-based endorsement
+// policy so only members of the currently trusted set can change governance state.
+// It deliberately sits OUTSIDE the prefixPeerTrust key-space so the GetAllPeerTrust
+// range scan never returns it.
+const singletonEndorserSet = "endorserset_current"
 
 // singletonIPFSAvail keys the most-recent IPFS-availability record so that
 // EvaluateConservativeFailover (Eq 3.69) can read Q_IPFS(t) without scanning.
@@ -195,4 +206,34 @@ type SystemConfig struct {
 	ThetaCC float64 `json:"thetaCC"` // CC anomaly composite threshold
 	TauCtrl float64 `json:"tauCtrl"` // Minimum controller trust threshold
 	QTh     float64 `json:"qTh"`     // Minimum IPFS availability ratio
+}
+
+// PeerTrust is the per-node EMA trust value T(p_j) for a candidate endorsing
+// peer org (supervisor's "node trust score"). It is the signal that the runtime
+// peer-selection step ranks on, so that the endorsing set P (Eq 3.55) is the
+// trusted subset of nodes rather than every node. NodeID is the peer org's MSP
+// identifier (e.g. "Org3MSP") so the score maps directly onto the Fabric-layer
+// endorsement policy. All scores start at neutralTrust, so selection is
+// meaningless until trust diverges — see SeedEndorserSet for the bootstrap.
+type PeerTrust struct {
+	DocType string  `json:"docType"` // "peertrust"
+	NodeID  string  `json:"nodeId"`  // peer org MSP id, e.g. "Org1MSP"
+	Score   float64 `json:"score"`   // T(p_j)
+	Updated int64   `json:"updated"` // last update timestamp
+}
+
+// ActiveEndorserSet is the single, current trust-selected endorsing-peer set P
+// (Eq 3.55) together with its BFT threshold k = floor(2n/3)+1 (Eq 3.56). It is
+// (re)written by SeedEndorserSet (bootstrap) and ReselectEndorsers (runtime,
+// every interval Delta). The application/gateway plane reads it to route
+// endorsement proposals only to the currently trusted peers, and the chaincode
+// binds governance keys to this set via a state-based endorsement policy.
+type ActiveEndorserSet struct {
+	DocType string   `json:"docType"` // "endorserset"
+	MSPIDs  []string `json:"mspIds"`  // selected trusted peer org MSP ids (P)
+	K       int      `json:"k"`       // required endorsements, floor(2|P|/3)+1
+	N       int      `json:"n"`       // |P| (selected peer count, n_p)
+	Epoch   int64    `json:"epoch"`   // selection epoch
+	BySel   string   `json:"bySel"`   // "ta-seed" | "all-seed" | "trust-rank"
+	Updated int64    `json:"updated"` // selection timestamp
 }
