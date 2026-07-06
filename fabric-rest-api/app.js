@@ -17,13 +17,19 @@ const path       = require('path');
 const fs         = require('fs');
 
 const app = express();
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
 
 const channelName   = 'mychannel';
 const chaincodeName = 'sdvncc';
 
-// ─── Build a connected Gateway + Contract for a single call ──────────────────
-async function buildGateway() {
+let globalGateway = null;
+let globalContract = null;
+
+// ─── Build a connected Gateway + Contract ONCE ──────────────────
+async function getContract() {
+    if (globalContract) return globalContract; // Return existing connection
+
     const ccpPath = path.resolve(
         __dirname, '..', 'test-network', 'organizations',
         'peerOrganizations', 'org1.example.com', 'connection-org1.json'
@@ -32,11 +38,7 @@ async function buildGateway() {
     const wallet = await Wallets.newFileSystemWallet(path.join(__dirname, 'wallet'));
 
     const identity = await wallet.get('admin');
-    if (!identity) {
-        throw new Error(
-            'Admin identity not found in wallet. Run: node enrollAdmin.js'
-        );
-    }
+    if (!identity) throw new Error('Admin identity not found in wallet.');
 
     const gateway = new Gateway();
     await gateway.connect(ccp, {
@@ -46,22 +48,11 @@ async function buildGateway() {
     });
 
     const network  = await gateway.getNetwork(channelName);
-    const contract = network.getContract(chaincodeName);
-    return { gateway, contract };
-}
-
-// ─── Safe disconnect helper — works whether disconnect() returns void or Promise ──
-function safeDisconnect(gateway) {
-    if (!gateway) return;
-    try {
-        const result = gateway.disconnect();
-        // If it happens to return a Promise (older versions), swallow rejection
-        if (result && typeof result.catch === 'function') {
-            result.catch(() => {});
-        }
-    } catch (_) {
-        // void return or synchronous error — both are fine, just swallow
-    }
+    globalContract = network.getContract(chaincodeName);
+    globalGateway  = gateway;
+    
+    console.log('[API] Persistent Fabric Gateway connection established.');
+    return globalContract;
 }
 
 // ─── POST /invoke/:fcn  — state-changing (submitTransaction) ─────────────────
@@ -71,31 +62,23 @@ app.post('/invoke/:fcn', async (req, res) => {
 
     console.log('\n=========================================');
     console.log(`[INVOKE] Function : ${fcn}`);
-    console.log(`[INVOKE] Arguments: ${JSON.stringify(args)}`);
-
-    let gateway = null;
-    let contract = null;
+    
+    // Prevent massive terminal lag from printing 4KB PQC keys
+    if (fcn === 'RegisterVehicle') console.log(`[INVOKE] Arguments: [Large PQC Keys Omitted]`);
+    else console.log(`[INVOKE] Arguments: ${JSON.stringify(args)}`);
 
     try {
-        ({ gateway, contract } = await buildGateway());
-
+        const contract = await getContract();
         const resultBytes = await contract.submitTransaction(fcn, ...args);
         const result      = resultBytes.toString();
 
         console.log(`[INVOKE] SUCCESS`);
-        console.log(`[INVOKE] Result  : ${result || '(empty)'}`);
-        console.log('=========================================\n');
-
         res.status(200).json({ result });
-
     } catch (error) {
         console.error(`[INVOKE ERROR] ${fcn}: ${error.message}`);
-        console.log('=========================================\n');
         res.status(500).json({ error: error.message });
-
-    } finally {
-        safeDisconnect(gateway);   // ← FIX: no more .catch() on void
     }
+    // REMOVED the finally { safeDisconnect(gateway) } block to keep connection alive!
 });
 
 // ─── POST /evaluate/:fcn  — read-only (evaluateTransaction) ──────────────────
@@ -105,30 +88,19 @@ app.post('/evaluate/:fcn', async (req, res) => {
 
     console.log('\n-----------------------------------------');
     console.log(`[EVALUATE] Function : ${fcn}`);
-    console.log(`[EVALUATE] Arguments: ${JSON.stringify(args)}`);
-
-    let gateway = null;
-    let contract = null;
 
     try {
-        ({ gateway, contract } = await buildGateway());
-
+        const contract = await getContract();
         const resultBytes = await contract.evaluateTransaction(fcn, ...args);
         const result      = resultBytes.toString();
 
-        console.log(`[EVALUATE] Result: ${result}`);
-        console.log('-----------------------------------------\n');
-
+        console.log(`[EVALUATE] SUCCESS`);
         res.status(200).json({ result });
-
     } catch (error) {
         console.error(`[EVALUATE ERROR] ${fcn}: ${error.message}`);
-        console.log('-----------------------------------------\n');
         res.status(500).json({ error: error.message });
-
-    } finally {
-        safeDisconnect(gateway);   // ← FIX
     }
+    // REMOVED the finally { safeDisconnect(gateway) } block!
 });
 
 // ─── GET /health ──────────────────────────────────────────────────────────────
