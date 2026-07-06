@@ -235,7 +235,17 @@ func (s *SmartContract) RevokeVehicle(ctx contractapi.TransactionContextInterfac
 // {SHA3-256(m_i), sigma_i, ts, CID} against which VerifyMessageIntegrity checks.
 func (s *SmartContract) SubmitMessageHash(ctx contractapi.TransactionContextInterface,
 	id string, ts int64, cidM string, hash string, sigB64 string) error {
+	
+	// 1. SECURITY CHECK: Verify the vehicle exists BEFORE processing the hash
+    vehicleExists, err := s.VehicleExists(ctx, id)
+    if err != nil {
+        return fmt.Errorf("failed to read vehicle %s from ledger: %w", id, err)
+    }
+    if !vehicleExists {
+        return fmt.Errorf("access denied: vehicle %s is not registered on the ledger", id)
+    }
 
+    // 2. Decode the Base64 signature
 	sig, err := base64.StdEncoding.DecodeString(sigB64)
 	if err != nil {
 		return fmt.Errorf("invalid message signature for vehicle %s: %w", id, err)
