@@ -281,27 +281,40 @@ func (s *SmartContract) RevokeVehicle(ctx contractapi.TransactionContextInterfac
 // SubmitMessageHash realises CID^m_i (Eq 3.71). This is a direct V2BC operation
 // that bypasses the controller, establishing the tamper-evident ground truth
 // {SHA3-256(m_i), sigma_i, ts, CID} against which VerifyMessageIntegrity checks.
-func (s *SmartContract) SubmitMessageHash(ctx contractapi.TransactionContextInterface,
-	id string, ts int64, cidM string, hash string, sigB64 string) error {
+func (s *SmartContract) SubmitMessageHash(ctx contractapi.TransactionContextInterface, 
+    id string, ts int64, cidM string, hash string, sigB64 string) error {
 
-	sig, err := base64.StdEncoding.DecodeString(sigB64)
-	if err != nil {
-		return fmt.Errorf("invalid message signature for vehicle %s: %w", id, err)
-	}
+    // 1. SECURITY CHECK: Verify the vehicle exists BEFORE processing the hash
+    vehicleExists, err := s.VehicleExists(ctx, id)
+    if err != nil {
+        return fmt.Errorf("failed to read vehicle %s from ledger: %w", id, err)
+    }
+    if !vehicleExists {
+        return fmt.Errorf("access denied: vehicle %s is not registered on the ledger", id)
+    }
 
-	rec := MessageHashRecord{
-		DocType: DocTypeMsgHash,
-		ID:      id,
-		Ts:      ts,
-		CIDm:    cidM,
-		Hash:    hash,
-		Sig:     sig,
-	}
-	key, err := ctx.GetStub().CreateCompositeKey(DocTypeMsgHash, []string{id, strconv.FormatInt(ts, 10)})
-	if err != nil {
-		return err
-	}
-	return putJSON(ctx, key, rec)
+    // 2. Decode the Base64 signature
+    sig, err := base64.StdEncoding.DecodeString(sigB64)
+    if err != nil {
+        return fmt.Errorf("invalid message signature for vehicle %s: %w", id, err)
+    }
+
+    // 3. Construct the record
+    rec := MessageHashRecord{
+        DocType: DocTypeMsgHash,
+        ID:      id,
+        Ts:      ts,
+        CIDm:    cidM,
+        Hash:    hash,
+        Sig:     sig,
+    }
+    
+    // 4. Create the composite key and save to ledger
+    key, err := ctx.GetStub().CreateCompositeKey(DocTypeMsgHash, []string{id, strconv.FormatInt(ts, 10)})
+    if err != nil {
+        return err
+    }
+    return putJSON(ctx, key, rec)
 }
 
 // VerifyMessageIntegrity realises the DIM hash compare (Eq 3.18). It returns the

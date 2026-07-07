@@ -31,3 +31,15 @@ install-fabric.sh
 
 # override the ignore of all config/ folders
 !full-stack-asset-transfer-guide/infrastructure/sample-network/config
+
+# Ignore Fabric CA directories
+organizations/fabric-ca/org1/
+organizations/fabric-ca/org2/
+organizations/fabric-ca/ordererOrg/
+organizations/peerOrganizations/
+organizations/ordererOrganizations/
+
+# Ignore chaincode directories
+sdvn-chaincode/node_modules
+sdvn-chaincode/sdvn-chaincode
+fabric-rest-api/node_modules

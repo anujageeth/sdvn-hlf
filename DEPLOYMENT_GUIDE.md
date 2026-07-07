@@ -180,9 +180,24 @@ peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.exa
 ## Step 6: Read Data from the Ledger (Query)
 Queries execute locally and instantly against peer0.org1.
 
-### Get All Registered Vehicles:
+### Get All Registered Vehicles (Full Details):
 ```bash
 peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetAllVehicles","Args":[]}'
+```
+
+### Get All Registered Vehicles (IDs Only):
+```bash
+peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetRegisteredVehicleIDs","Args":[]}'
+```
+
+### Get All Registered Controllers (Full Details):
+```bash
+peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetAllControllers","Args":[]}'
+```
+
+### Get All Registered Controllers (IDs Only):
+```bash
+peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetRegisteredControllerIDs","Args":[]}'
 ```
 
 ### Get the Active Trust-Selected Endorser Set:
@@ -200,6 +215,11 @@ peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetPeerTrustScore",
 peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetControllerTrustScore","Args":["CTRL_01"]}'
 ```
 
+### Get Trust Scores for All Controllers:
+```bash
+peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetAllControllerTrusts","Args":[]}'
+```
+
 ### Retrieve the message hashes related to a specific vehicle:
 ```bash
 peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetMessageHistory","Args":["<VEHICLE_ID>"]}'
@@ -208,6 +228,26 @@ peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetMessageHistory",
 ### Verify a Cross-Channel Message Hash:
 ```bash
 peer chaincode query -C mychannel -n sdvncc -c '{"function":"VerifyMessageIntegrity","Args":["V_200", "1718500100", "hash_of_message_abc"]}'
+```
+
+### Retrieve the CC Signatures for a Specific Controller:
+```bash
+peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetCCSignatures","Args":["CTRL_01"]}'
+```
+
+### Retrieve All DRL Mitigation Incidents:
+```bash
+peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetAllIncidents","Args":[]}'
+```
+
+### Retrieve the Audit Logs for a Specific Vehicle:
+```bash
+peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetVehicleAuditLogs","Args":["V_200"]}'
+```
+
+### Retrieve Global Security Thresholds (System Config):
+```bash
+peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetPublicSystemConfig","Args":[]}'
 ```
 
 ## Step 7: Connect with NS3 Simulation:
@@ -231,6 +271,16 @@ Expected Output: `SDVN Blockchain REST API Gateway listening on port 3000`
 ```bash
 cd ~/ns-allinone-3.35/ns-3.35
 ./waf --run scratch/DCA
+```
+
+### Watch the API terminal logs in real-time:
+```bash
+tail -f /tmp/fabric-api.log
+```
+
+### Read API terminal log file:
+```bash
+cat /tmp/fabric-api.log
 ```
 
 ## Step 8: Clean Teardown
