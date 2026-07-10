@@ -1049,3 +1049,173 @@ func (s *SmartContract) getSystemConfig(ctx contractapi.TransactionContextInterf
 	}
 	return &cfg, nil
 }
+
+
+//=====================================================================================
+
+// GetRegisteredVehicleIDs returns only the list of registered Vehicle IDs.
+func (s *SmartContract) GetRegisteredVehicleIDs(ctx contractapi.TransactionContextInterface) ([]string, error) {
+	iter, err := ctx.GetStub().GetStateByRange(prefixVehicle, prefixRangeEnd(prefixVehicle))
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	var ids []string
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		
+		var v VehicleIdentity
+		if err := json.Unmarshal(kv.Value, &v); err != nil {
+			return nil, err
+		}
+		
+		// Append only the ID string instead of the whole struct
+		ids = append(ids, v.ID)
+	}
+	
+	return ids, nil
+}
+
+// GetRegisteredControllerIDs returns only the list of registered Controller IDs.
+func (s *SmartContract) GetRegisteredControllerIDs(ctx contractapi.TransactionContextInterface) ([]string, error) {
+	iter, err := ctx.GetStub().GetStateByRange(prefixCtrlKey, prefixRangeEnd(prefixCtrlKey))
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	var ids []string
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		
+		var ck ControllerKey
+		if err := json.Unmarshal(kv.Value, &ck); err != nil {
+			return nil, err
+		}
+		
+		// Append only the CtrlID string instead of the whole struct
+		ids = append(ids, ck.CtrlID)
+	}
+	
+	return ids, nil
+}
+
+// --------------------------------------------------------------------------------------
+
+// GetAllControllers returns every ControllerKey registered in the ledger.
+func (s *SmartContract) GetAllControllers(ctx contractapi.TransactionContextInterface) ([]*ControllerKey, error) {
+	iter, err := ctx.GetStub().GetStateByRange(prefixCtrlKey, prefixRangeEnd(prefixCtrlKey))
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	controllers := make([]*ControllerKey, 0)
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		var ck ControllerKey
+		if err := json.Unmarshal(kv.Value, &ck); err != nil {
+			return nil, err
+		}
+		controllers = append(controllers, &ck)
+	}
+	return controllers, nil
+}
+
+// GetAllControllerTrusts returns the trust records for all controllers.
+func (s *SmartContract) GetAllControllerTrusts(ctx contractapi.TransactionContextInterface) ([]*ControllerTrust, error) {
+	iter, err := ctx.GetStub().GetStateByRange(prefixCtrlTrust, prefixRangeEnd(prefixCtrlTrust))
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	trusts := make([]*ControllerTrust, 0)
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		var ct ControllerTrust
+		if err := json.Unmarshal(kv.Value, &ct); err != nil {
+			return nil, err
+		}
+		trusts = append(trusts, &ct)
+	}
+	return trusts, nil
+}
+
+// GetCCSignatures returns the latest aggregated CC signatures for a specific controller.
+func (s *SmartContract) GetCCSignatures(ctx contractapi.TransactionContextInterface, ctrlID string) (*CCSignatureRecord, error) {
+	var cc CCSignatureRecord
+	ok, err := getJSON(ctx, prefixCCSig+ctrlID, &cc)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("no CC signatures found for controller %s", ctrlID)
+	}
+	return &cc, nil
+}
+
+// GetAllIncidents returns the history of all DRL mitigation actions and failovers.
+func (s *SmartContract) GetAllIncidents(ctx contractapi.TransactionContextInterface) ([]*IncidentLog, error) {
+	// Passing an empty array retrieves all records under DocTypeIncident
+	iter, err := ctx.GetStub().GetStateByPartialCompositeKey(DocTypeIncident, []string{})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	incidents := make([]*IncidentLog, 0)
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		var inc IncidentLog
+		if err := json.Unmarshal(kv.Value, &inc); err != nil {
+			return nil, err
+		}
+		incidents = append(incidents, &inc)
+	}
+	return incidents, nil
+}
+
+// GetVehicleAuditLogs returns the anchored IPFS CIDs for a specific vehicle.
+func (s *SmartContract) GetVehicleAuditLogs(ctx contractapi.TransactionContextInterface, id string) ([]*AuditLog, error) {
+	iter, err := ctx.GetStub().GetStateByPartialCompositeKey(DocTypeAudit, []string{id})
+	if err != nil {
+		return nil, err
+	}
+	defer iter.Close()
+
+	logs := make([]*AuditLog, 0)
+	for iter.HasNext() {
+		kv, err := iter.Next()
+		if err != nil {
+			return nil, err
+		}
+		var log AuditLog
+		if err := json.Unmarshal(kv.Value, &log); err != nil {
+			return nil, err
+		}
+		logs = append(logs, &log)
+	}
+	return logs, nil
+}
+
+// GetPublicSystemConfig exposes the global security thresholds to external clients.
+func (s *SmartContract) GetPublicSystemConfig(ctx contractapi.TransactionContextInterface) (*SystemConfig, error) {
+	return s.getSystemConfig(ctx)
+}
