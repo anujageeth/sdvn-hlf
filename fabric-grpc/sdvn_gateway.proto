@@ -1,0 +1,30 @@
+syntax = "proto3";
+package sdvngw;
+
+service FabricGateway {
+  rpc Invoke(TxRequest) returns (TxAck);       // fire-and-forget submit
+  rpc Evaluate(TxRequest) returns (TxResult);  // synchronous read
+  rpc Health(Empty) returns (HealthStatus);
+}
+
+message TxRequest {
+  string fcn = 1;
+  repeated string args = 2;
+}
+
+message TxAck {
+  string status = 1;
+  string message = 2;
+}
+
+message TxResult {
+  string result = 1;
+  string error = 2;
+}
+
+message Empty {}
+
+message HealthStatus {
+  string status = 1;
+  bool connected = 2;
+}

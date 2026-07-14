@@ -80,13 +80,13 @@ peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.exa
   -c '{"function":"SetSystemConfig","Args":["0.5", "0.7", "0.5", "0.8"]}'
 sleep 4 # Brief pause to allow block to commit
 
-echo "-> 5B. Seed the Trust-Based Endorser Set..."
-peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --cafile $ORDERER_CA -C mychannel -n sdvncc \
-  --peerAddresses localhost:7051 --tlsRootCertFiles $ORG1_CA \
-  --peerAddresses localhost:9051 --tlsRootCertFiles $ORG2_CA \
-  --peerAddresses localhost:11051 --tlsRootCertFiles $ORG3_CA \
-  -c '{"function":"SeedEndorserSet","Args":["[\"Org1MSP\",\"Org2MSP\",\"Org3MSP\",\"Org4MSP\"]", "all-seed", "1", "1718400000"]}'
-sleep 4
+# echo "-> 5B. Seed the Trust-Based Endorser Set..."
+# peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --cafile $ORDERER_CA -C mychannel -n sdvncc \
+#   --peerAddresses localhost:7051 --tlsRootCertFiles $ORG1_CA \
+#   --peerAddresses localhost:9051 --tlsRootCertFiles $ORG2_CA \
+#   --peerAddresses localhost:11051 --tlsRootCertFiles $ORG3_CA \
+#   -c '{"function":"SeedEndorserSet","Args":["[\"Org1MSP\",\"Org2MSP\",\"Org3MSP\",\"Org4MSP\"]", "all-seed", "1", "1718400000"]}'
+# sleep 4
 
 echo "-> 5C. Anchor the Chaincode Hash..."
 peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.example.com --tls --cafile $ORDERER_CA -C mychannel -n sdvncc \
@@ -112,13 +112,13 @@ peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.exa
   -c '{"function":"WriteAuditLog","Args":["CTRL_01", "1718500200", "QmAuditLogCID987654321", "hash_of_audit_log_xyz"]}'
 sleep 4
 
-# echo "=========================================================="
-# echo " STEP 7: Connect with NS3 Simulation (Start API Gateway)"
-# echo "=========================================================="
-# cd $HLF_DIR/fabric-rest-api
+echo "=========================================================="
+echo " STEP 7: Connect with NS3 Simulation (Start API Gateway)"
+echo "=========================================================="
+cd $HLF_DIR/fabric-rest-api
 
-# echo "Enrolling Admin Identity..."
-# node enrollAdmin.js
+echo "Enrolling Admin Identity..."
+node enrollAdmin.js
 
 # echo "Starting Node.js REST API in the background..."
 # # Run the node app in the background and output logs to api_gateway.log

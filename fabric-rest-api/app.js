@@ -146,10 +146,10 @@ const PORT = process.env.PORT || 3000;
 initFabric().then(() => {
     app.listen(PORT, () => {
         console.log('===================================================');
-        console.log(`SDVN Fabric REST API  — Listening on port ${PORT}`);
-        console.log(`Channel  : ${channelName}`);
-        console.log(`Chaincode: ${chaincodeName}`);
-        console.log('Status   : Ready for high-throughput NS-3 traffic');
+        console.log(`🚀 SDVN Fabric REST API  — Listening on port ${PORT}`);
+        console.log(`   Channel  : ${channelName}`);
+        console.log(`   Chaincode: ${chaincodeName}`);
+        console.log('   Status   : Ready for high-throughput NS-3 traffic');
         console.log('===================================================');
     });
 });
