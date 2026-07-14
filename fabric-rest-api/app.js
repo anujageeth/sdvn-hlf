@@ -1,11 +1,10 @@
 /**
- * app.js  (v4 — fixes gateway.disconnect() TypeError)
+ * app.js (v5 - High-Performance SDVN API Gateway)
  *
- * Root cause: fabric-network v2.x gateway.disconnect() returns void, not
- * a Promise. Calling .catch() on void throws:
- *   TypeError: Cannot read properties of undefined (reading 'catch')
- *
- * Fix: wrap the disconnect in try/catch instead of chaining .catch().
+ * Optimizations applied for NS-3 Simulation:
+ * 1. Strict Singleton Connection: Connects to Fabric ONCE on startup.
+ * 2. Fire-and-Forget Invokes: Returns HTTP 202 immediately to NS-3.
+ * 3. Evaluate queries mapped correctly for read-only functions.
  */
 
 'use strict';
@@ -17,111 +16,140 @@ const path       = require('path');
 const fs         = require('fs');
 
 const app = express();
-app.use(bodyParser.json({ limit: '10mb' }));
+app.use(bodyParser.json({ limit: '10mb' })); // Increased limit for heavy PQC keys
 app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
 
 const channelName   = 'mychannel';
 const chaincodeName = 'sdvncc';
 
+// Global variables for persistent gRPC connection
 let globalGateway = null;
 let globalContract = null;
 
-// ─── Build a connected Gateway + Contract ONCE ──────────────────
-async function getContract() {
-    if (globalContract) return globalContract; // Return existing connection
+// ─── 1. INITIALIZE FABRIC CONNECTION ON STARTUP ───────────────────────────
+async function initFabric() {
+    try {
+        console.log('Initializing Hyperledger Fabric connection...');
+        const ccpPath = path.resolve(
+            __dirname, '..', 'test-network', 'organizations',
+            'peerOrganizations', 'org1.example.com', 'connection-org1.json'
+        );
+        const ccp = JSON.parse(fs.readFileSync(ccpPath, 'utf8'));
+        const walletPath = path.join(__dirname, 'wallet');
+        const wallet = await Wallets.newFileSystemWallet(walletPath);
 
-    const ccpPath = path.resolve(
-        __dirname, '..', 'test-network', 'organizations',
-        'peerOrganizations', 'org1.example.com', 'connection-org1.json'
-    );
-    const ccp    = JSON.parse(fs.readFileSync(ccpPath, 'utf8'));
-    const wallet = await Wallets.newFileSystemWallet(path.join(__dirname, 'wallet'));
+        const identity = await wallet.get('admin');
+        if (!identity) {
+            console.error('Admin identity not found in wallet. Run enrollAdmin.js first!');
+            return false;
+        }
 
-    const identity = await wallet.get('admin');
-    if (!identity) throw new Error('Admin identity not found in wallet.');
+        globalGateway = new Gateway();
+        
+        // Connect ONCE and hold the connection open
+        await globalGateway.connect(ccp, {
+            wallet,
+            identity: 'admin',
+            discovery: { enabled: true, asLocalhost: true }
+        });
 
-    const gateway = new Gateway();
-    await gateway.connect(ccp, {
-        wallet,
-        identity:  'admin',
-        discovery: { enabled: true, asLocalhost: true }
-    });
-
-    const network  = await gateway.getNetwork(channelName);
-    globalContract = network.getContract(chaincodeName);
-    globalGateway  = gateway;
-    
-    console.log('[API] Persistent Fabric Gateway connection established.');
-    return globalContract;
+        const network = await globalGateway.getNetwork(channelName);
+        globalContract = network.getContract(chaincodeName);
+        
+        console.log('✅ Hyperledger Fabric connected successfully. Contract ready.');
+        return true;
+    } catch (error) {
+        console.error(`❌ Failed to connect to Fabric: ${error.message}`);
+        return false;
+    }
 }
 
-// ─── POST /invoke/:fcn  — state-changing (submitTransaction) ─────────────────
-app.post('/invoke/:fcn', async (req, res) => {
-    const fcn  = req.params.fcn;
-    const args = (req.body && Array.isArray(req.body.args)) ? req.body.args : [];
-
-    console.log('\n=========================================');
-    console.log(`[INVOKE] Function : ${fcn}`);
+// ─── 2. WRITE OPERATIONS (FIRE AND FORGET) ────────────────────────────────
+app.post('/invoke/:fcn', (req, res) => {
+    const fcn = req.params.fcn;
     
-    // Prevent massive terminal lag from printing 4KB PQC keys
-    if (fcn === 'RegisterVehicle') console.log(`[INVOKE] Arguments: [Large PQC Keys Omitted]`);
-    else console.log(`[INVOKE] Arguments: ${JSON.stringify(args)}`);
-
-    try {
-        const contract = await getContract();
-        const resultBytes = await contract.submitTransaction(fcn, ...args);
-        const result      = resultBytes.toString();
-
-        console.log(`[INVOKE] SUCCESS`);
-        res.status(200).json({ result });
-    } catch (error) {
-        console.error(`[INVOKE ERROR] ${fcn}: ${error.message}`);
-        res.status(500).json({ error: error.message });
+    // Parse arguments sent from NS-3 C++ curl requests
+    let args = req.body.args || req.body;
+    if (!Array.isArray(args)) {
+        args = Object.values(args).map(arg => String(arg));
+    } else {
+        args = args.map(arg => String(arg));
     }
-    // REMOVED the finally { safeDisconnect(gateway) } block to keep connection alive!
+
+    // A. Instantly return 202 Accepted to NS-3 so the simulation does not freeze
+    res.status(202).json({ 
+        status: 'queued', 
+        message: `Transaction ${fcn} accepted for processing.` 
+    });
+
+    console.log(`[INVOKE QUEUED] Function : ${fcn} | Args received: ${args.length}`);
+
+    // B. Process the transaction consensus in the background asynchronously
+    if (globalContract) {
+        globalContract.submitTransaction(fcn, ...args)
+            .then(() => {
+                console.log(`[INVOKE SUCCESS] ${fcn} securely committed to ledger.`);
+            })
+            .catch(error => {
+                console.error(`[INVOKE ERROR] ${fcn} failed during consensus: ${error.message}`);
+            });
+    } else {
+        console.error(`[INVOKE ERROR] Contract not initialized. Cannot execute ${fcn}.`);
+    }
 });
 
-// ─── POST /evaluate/:fcn  — read-only (evaluateTransaction) ──────────────────
-app.post('/evaluate/:fcn', async (req, res) => {
-    const fcn  = req.params.fcn;
-    const args = (req.body && Array.isArray(req.body.args)) ? req.body.args : [];
-
-    console.log('\n-----------------------------------------');
-    console.log(`[EVALUATE] Function : ${fcn}`);
+// ─── 3. READ OPERATIONS (EVALUATE - FAST) ─────────────────────────────────
+app.get('/evaluate/:fcn', async (req, res) => {
+    const fcn = req.params.fcn;
+    
+    // Handle parameters passed in URL (e.g., /evaluate/QueryVehicle?args=["V1"])
+    let args = [];
+    if (req.query.args) {
+        try {
+            args = JSON.parse(req.query.args).map(arg => String(arg));
+        } catch (e) {
+            args = [String(req.query.args)];
+        }
+    }
 
     try {
-        const contract = await getContract();
-        const resultBytes = await contract.evaluateTransaction(fcn, ...args);
-        const result      = resultBytes.toString();
+        if (!globalContract) throw new Error("Contract not initialized.");
+        
+        // Evaluate pulls directly from local peer StateDB (Extremely fast, no consensus wait)
+        const resultBytes = await globalContract.evaluateTransaction(fcn, ...args);
+        const result = resultBytes.toString();
 
-        console.log(`[EVALUATE] SUCCESS`);
+        console.log(`[EVALUATE SUCCESS] Function : ${fcn}`);
         res.status(200).json({ result });
     } catch (error) {
         console.error(`[EVALUATE ERROR] ${fcn}: ${error.message}`);
         res.status(500).json({ error: error.message });
     }
-    // REMOVED the finally { safeDisconnect(gateway) } block!
 });
 
-// ─── GET /health ──────────────────────────────────────────────────────────────
-app.get('/health', async (req, res) => {
+// ─── 4. HEALTH CHECK ROUTINE ──────────────────────────────────────────────
+app.get('/health', (req, res) => {
     const walletOk = fs.existsSync(path.join(__dirname, 'wallet', 'admin.id'));
     res.status(200).json({
         status:    'ok',
         chaincode: chaincodeName,
         channel:   channelName,
-        wallet:    walletOk ? 'admin present' : 'MISSING — run node enrollAdmin.js'
+        wallet:    walletOk ? 'admin present' : 'MISSING',
+        connected: globalContract !== null
     });
 });
 
-app.listen(3000, () => {
-    console.log('===========================================');
-    console.log('  SDVN Fabric REST API  — port 3000');
-    console.log(`  Channel  : ${channelName}`);
-    console.log(`  Chaincode: ${chaincodeName}`);
-    console.log('  Routes:');
-    console.log('    POST /invoke/:fcn   — submitTransaction');
-    console.log('    POST /evaluate/:fcn — evaluateTransaction');
-    console.log('    GET  /health        — liveness + wallet check');
-    console.log('===========================================\n');
+// ─── 5. BOOTSTRAP SERVER ──────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+
+// Force Fabric to connect before opening the API to NS-3 traffic
+initFabric().then(() => {
+    app.listen(PORT, () => {
+        console.log('===================================================');
+        console.log(`SDVN Fabric REST API  — Listening on port ${PORT}`);
+        console.log(`Channel  : ${channelName}`);
+        console.log(`Chaincode: ${chaincodeName}`);
+        console.log('Status   : Ready for high-throughput NS-3 traffic');
+        console.log('===================================================');
+    });
 });
