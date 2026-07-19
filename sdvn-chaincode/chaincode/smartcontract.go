@@ -266,6 +266,83 @@ func (s *SmartContract) SubmitMessageHash(ctx contractapi.TransactionContextInte
 	return putJSON(ctx, key, rec)
 }
 
+// batchMsgHash is one entry in a SubmitMessageHashBatch payload. It carries the
+// same fields as a SubmitMessageHash call; ts is a JSON number (int64) and sig is
+// base64-encoded.
+type batchMsgHash struct {
+	ID   string `json:"id"`
+	Ts   int64  `json:"ts"`
+	CID  string `json:"cid"`
+	Hash string `json:"hash"`
+	Sig  string `json:"sig"`
+}
+
+// SubmitMessageHashBatch commits many CID^m_i records (Eq 3.71) in ONE transaction.
+//
+// The off-chain application plane buffers per-beacon message hashes and submits
+// them here as a JSON array, so a whole detection window's worth of records is
+// committed as a single Fabric transaction instead of one tx per beacon. This is
+// purely a throughput optimisation: each record is written to exactly the same
+// composite key (DocTypeMsgHash|id|ts) as SubmitMessageHash, so VerifyMessageIntegrity
+// and GetMessageHistory see no difference.
+//
+// Records for unregistered vehicles or with an undecodable signature are skipped
+// (not fatal) so one bad entry cannot discard an otherwise-valid batch. The count
+// of records actually persisted is returned.
+func (s *SmartContract) SubmitMessageHashBatch(ctx contractapi.TransactionContextInterface,
+	batchJSON string) (int, error) {
+
+	var records []batchMsgHash
+	if err := json.Unmarshal([]byte(batchJSON), &records); err != nil {
+		return 0, fmt.Errorf("batch payload must be a JSON array of {id,ts,cid,hash,sig}: %w", err)
+	}
+
+	// Cache vehicle-existence lookups so a 200-vehicle window does not issue one
+	// GetState per record for vehicles that repeat within the batch.
+	exists := make(map[string]bool)
+	written := 0
+	for _, r := range records {
+		if r.ID == "" {
+			continue
+		}
+		ok, cached := exists[r.ID]
+		if !cached {
+			var err error
+			ok, err = s.VehicleExists(ctx, r.ID)
+			if err != nil {
+				return written, fmt.Errorf("failed to read vehicle %s from ledger: %w", r.ID, err)
+			}
+			exists[r.ID] = ok
+		}
+		if !ok {
+			continue // unregistered vehicle => skip (matches SubmitMessageHash's access denial)
+		}
+
+		sig, err := base64.StdEncoding.DecodeString(r.Sig)
+		if err != nil {
+			continue // undecodable signature => skip this record, keep the rest
+		}
+
+		rec := MessageHashRecord{
+			DocType: DocTypeMsgHash,
+			ID:      r.ID,
+			Ts:      r.Ts,
+			CIDm:    r.CID,
+			Hash:    r.Hash,
+			Sig:     sig,
+		}
+		key, err := ctx.GetStub().CreateCompositeKey(DocTypeMsgHash, []string{r.ID, strconv.FormatInt(r.Ts, 10)})
+		if err != nil {
+			return written, err
+		}
+		if err := putJSON(ctx, key, rec); err != nil {
+			return written, err
+		}
+		written++
+	}
+	return written, nil
+}
+
 // VerifyMessageIntegrity realises the DIM hash compare (Eq 3.18). It returns the
 // per-message integrity indicator S^{(i)}_DIM = 1[ forwardedHash != on-chain ].
 // A return of true means the controller-forwarded message was tampered with.

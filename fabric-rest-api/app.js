@@ -64,6 +64,69 @@ async function initFabric() {
     }
 }
 
+// ─── 1b. PER-ENTITY SERIALIZATION + MVCC RETRY ────────────────────────────
+//
+// Fabric uses optimistic concurrency (MVCC): if two transactions in the same
+// block read-then-write (or write/write) the SAME key, only the first commits;
+// the rest fail with MVCC_READ_CONFLICT. NS-3 fires writes fire-and-forget, so
+// multiple transactions touching the same on-chain entity (e.g. RecordCCSignatures
+// then UpdateControllerTrustScore for controller C0 — the latter READS the ccsig
+// key the former WRITES) were landing in one block and colliding.
+//
+// Fix: funnel every write that touches a given entity through a single-file
+// promise chain keyed by that entity, so the next same-entity submit only starts
+// after the previous one has COMMITTED (submitTransaction resolves post-commit).
+// Writes to different entities still run in parallel. A bounded retry with jittered
+// backoff mops up any residual conflict (e.g. against a startup registration).
+
+const keyChains = new Map(); // serialization key -> tail Promise
+
+// The conflict domain is the on-chain entity. args[0] is the vehicle ("V5") or
+// controller ("C0") id for every per-entity write, so key on it — this groups
+// RecordCCSignatures+UpdateControllerTrustScore (C0) and UpdateTrustScore+
+// WriteAuditLog+RegisterFlowRule (V5) onto the same lane. Everything else
+// (SubmitMessageHashBatch, RecordIPFSAvailability, LogIncident) gets a stable
+// per-function lane so its own repeats serialize without blocking other work.
+function serialKeyFor(fcn, args) {
+    const id = args[0];
+    if (typeof id === 'string' && /^[CV]\d+$/.test(id)) return 'entity:' + id;
+    return 'fcn:' + fcn;
+}
+
+async function submitWithRetry(fcn, args, maxRetries = 6) {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            await globalContract.submitTransaction(fcn, ...args);
+            return;
+        } catch (err) {
+            const msg = (err && err.message) || '';
+            const transient = msg.includes('MVCC_READ_CONFLICT') ||
+                              msg.includes('PHANTOM_READ_CONFLICT') ||
+                              msg.includes('ENDORSEMENT_POLICY_FAILURE');
+            if (transient && attempt < maxRetries) {
+                const backoff = 120 * (attempt + 1) + Math.floor(Math.random() * 120);
+                await new Promise(r => setTimeout(r, backoff));
+                continue;
+            }
+            throw err;
+        }
+    }
+}
+
+// Chain the submit onto its entity lane and return the promise. A prior failure
+// on the lane must not break the chain, so we swallow it before chaining.
+function enqueueSerial(fcn, args) {
+    const key = serialKeyFor(fcn, args);
+    const prev = keyChains.get(key) || Promise.resolve();
+    const next = prev.catch(() => {}).then(() => submitWithRetry(fcn, args));
+    keyChains.set(key, next);
+    // Drop the lane once it drains so the Map does not grow unbounded.
+    next.catch(() => {}).finally(() => {
+        if (keyChains.get(key) === next) keyChains.delete(key);
+    });
+    return next;
+}
+
 // ─── 2. WRITE OPERATIONS (HYBRID: SYNC vs ASYNC) ──────────────────────────
 app.post('/invoke/:fcn', async (req, res) => {
     const fcn = req.params.fcn;
@@ -94,7 +157,7 @@ app.post('/invoke/:fcn', async (req, res) => {
         // =================================================================
         console.log(`[INVOKE SYNC] Processing : ${fcn} | Waiting for consensus...`);
         try {
-            await globalContract.submitTransaction(fcn, ...args);
+            await enqueueSerial(fcn, args);
             console.log(`[INVOKE SUCCESS] ${fcn} securely committed to ledger.`);
             res.status(200).json({ status: 'success', message: `Transaction ${fcn} committed.` });
         } catch (error) {
@@ -108,12 +171,9 @@ app.post('/invoke/:fcn', async (req, res) => {
         res.status(202).json({ status: 'queued', message: `Transaction ${fcn} accepted.` });
         console.log(`[INVOKE ASYNC] Queued : ${fcn} | Simulation unblocked.`);
 
-        // Process in background
-        globalContract.submitTransaction(fcn, ...args)
-            .then(() => {
-                // Optional: Mute success logs for hashes if it clutters your terminal
-                // console.log(`[ASYNC SUCCESS] ${fcn} committed.`);
-            })
+        // Process in background, serialized per entity so same-key writes never
+        // collide in a block (MVCC_READ_CONFLICT), with bounded retry on conflict.
+        enqueueSerial(fcn, args)
             .catch(error => {
                 console.error(`[ASYNC ERROR] ${fcn} failed in background: ${error.message}`);
             });
