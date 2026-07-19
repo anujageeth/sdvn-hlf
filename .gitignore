@@ -39,3 +39,7 @@ organizations/fabric-ca/ordererOrg/
 organizations/peerOrganizations/
 organizations/ordererOrganizations/
 fabric-rest-api/wallet/admin.id
+fabric-grpc/package-lock.json
+fabric-rest-api/wallet/admin.id
+fabric-grpc/wallet/admin.id
+fabric-rest-api/wallet/admin.id

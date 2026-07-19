@@ -1,10 +1,11 @@
 /**
- * app.js (v5 - High-Performance SDVN API Gateway)
+ * app.js (v6 - Hybrid Sync/Async SDVN API Gateway)
  *
  * Optimizations applied for NS-3 Simulation:
- * 1. Strict Singleton Connection: Connects to Fabric ONCE on startup.
- * 2. Fire-and-Forget Invokes: Returns HTTP 202 immediately to NS-3.
- * 3. Evaluate queries mapped correctly for read-only functions.
+ * 1. Strict Singleton Connection.
+ * 2. Hybrid Invokes: 
+ * - Waits for Consensus for Registration/Setup functions.
+ * - Fire-and-Forget (Instant 202) for high-frequency Hash/Trust logs.
  */
 
 'use strict';
@@ -16,7 +17,7 @@ const path       = require('path');
 const fs         = require('fs');
 
 const app = express();
-app.use(bodyParser.json({ limit: '10mb' })); // Increased limit for heavy PQC keys
+app.use(bodyParser.json({ limit: '10mb' })); 
 app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
 
 const channelName   = 'mychannel';
@@ -46,7 +47,6 @@ async function initFabric() {
 
         globalGateway = new Gateway();
         
-        // Connect ONCE and hold the connection open
         await globalGateway.connect(ccp, {
             wallet,
             identity: 'admin',
@@ -64,11 +64,11 @@ async function initFabric() {
     }
 }
 
-// ─── 2. WRITE OPERATIONS (FIRE AND FORGET) ────────────────────────────────
-app.post('/invoke/:fcn', (req, res) => {
+// ─── 2. WRITE OPERATIONS (HYBRID: SYNC vs ASYNC) ──────────────────────────
+app.post('/invoke/:fcn', async (req, res) => {
     const fcn = req.params.fcn;
     
-    // Parse arguments sent from NS-3 C++ curl requests
+    // Parse arguments
     let args = req.body.args || req.body;
     if (!Array.isArray(args)) {
         args = Object.values(args).map(arg => String(arg));
@@ -76,25 +76,47 @@ app.post('/invoke/:fcn', (req, res) => {
         args = args.map(arg => String(arg));
     }
 
-    // A. Instantly return 202 Accepted to NS-3 so the simulation does not freeze
-    res.status(202).json({ 
-        status: 'queued', 
-        message: `Transaction ${fcn} accepted for processing.` 
-    });
+    if (!globalContract) {
+        return res.status(500).json({ error: "Contract not initialized." });
+    }
 
-    console.log(`[INVOKE QUEUED] Function : ${fcn} | Args received: ${args.length}`);
+    // DEFINE WHICH FUNCTIONS MUST WAIT FOR BLOCKCHAIN CONSENSUS
+    const syncFunctions = [
+        'RegisterVehicle', 
+        'RegisterControllerKey', 
+        'SetSystemConfig', 
+        'SeedEndorserSet'
+    ];
 
-    // B. Process the transaction consensus in the background asynchronously
-    if (globalContract) {
+    if (syncFunctions.includes(fcn)) {
+        // =================================================================
+        // SYNCHRONOUS MODE: Block NS-3 until the ledger is fully updated
+        // =================================================================
+        console.log(`[INVOKE SYNC] Processing : ${fcn} | Waiting for consensus...`);
+        try {
+            await globalContract.submitTransaction(fcn, ...args);
+            console.log(`[INVOKE SUCCESS] ${fcn} securely committed to ledger.`);
+            res.status(200).json({ status: 'success', message: `Transaction ${fcn} committed.` });
+        } catch (error) {
+            console.error(`[INVOKE ERROR] ${fcn} failed: ${error.message}`);
+            res.status(500).json({ error: error.message });
+        }
+    } else {
+        // =================================================================
+        // ASYNCHRONOUS MODE: Fire-and-Forget to keep NS-3 running fast
+        // =================================================================
+        res.status(202).json({ status: 'queued', message: `Transaction ${fcn} accepted.` });
+        console.log(`[INVOKE ASYNC] Queued : ${fcn} | Simulation unblocked.`);
+
+        // Process in background
         globalContract.submitTransaction(fcn, ...args)
             .then(() => {
-                console.log(`[INVOKE SUCCESS] ${fcn} securely committed to ledger.`);
+                // Optional: Mute success logs for hashes if it clutters your terminal
+                // console.log(`[ASYNC SUCCESS] ${fcn} committed.`);
             })
             .catch(error => {
-                console.error(`[INVOKE ERROR] ${fcn} failed during consensus: ${error.message}`);
+                console.error(`[ASYNC ERROR] ${fcn} failed in background: ${error.message}`);
             });
-    } else {
-        console.error(`[INVOKE ERROR] Contract not initialized. Cannot execute ${fcn}.`);
     }
 });
 
@@ -102,7 +124,6 @@ app.post('/invoke/:fcn', (req, res) => {
 app.get('/evaluate/:fcn', async (req, res) => {
     const fcn = req.params.fcn;
     
-    // Handle parameters passed in URL (e.g., /evaluate/QueryVehicle?args=["V1"])
     let args = [];
     if (req.query.args) {
         try {
@@ -115,7 +136,6 @@ app.get('/evaluate/:fcn', async (req, res) => {
     try {
         if (!globalContract) throw new Error("Contract not initialized.");
         
-        // Evaluate pulls directly from local peer StateDB (Extremely fast, no consensus wait)
         const resultBytes = await globalContract.evaluateTransaction(fcn, ...args);
         const result = resultBytes.toString();
 
@@ -142,14 +162,13 @@ app.get('/health', (req, res) => {
 // ─── 5. BOOTSTRAP SERVER ──────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 
-// Force Fabric to connect before opening the API to NS-3 traffic
 initFabric().then(() => {
     app.listen(PORT, () => {
         console.log('===================================================');
         console.log(`🚀 SDVN Fabric REST API  — Listening on port ${PORT}`);
         console.log(`   Channel  : ${channelName}`);
         console.log(`   Chaincode: ${chaincodeName}`);
-        console.log('   Status   : Ready for high-throughput NS-3 traffic');
+        console.log('   Status   : Ready for Hybrid (Sync/Async) traffic');
         console.log('===================================================');
     });
 });
