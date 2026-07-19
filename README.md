@@ -177,7 +177,34 @@ peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.exa
 ```
 *(Args order: `nPeers`, `epoch`, `ts`. Additional candidate nodes can be enrolled beforehand with `RegisterPeerNode`.)* After re-selection, refresh the committed chaincode endorsement policy (`--ccep`) to match `GetActiveEndorserSet` at the next governance window.
 
-## Step 6: Read Data from the Ledger (Query)
+## Step 6: Manually Reset and Restart IPFS
+*Use this when you need to clear the local IPFS repo, remove recursively pinned blocks, and restart the daemon before continuing with the REST API or NS-3 flow.*
+
+```bash
+# Stop the daemon first
+pkill -f "ipfs daemon" 2>/dev/null || fuser -k 5001/tcp 2>/dev/null
+sleep 1
+
+# Nuke the repo entirely and reinit
+rm -rf ~/.ipfs
+ipfs init
+
+# Unpin + garbage collect (keeps repo config, clears content)
+# Unpin everything that's recursively pinned
+ipfs pin ls --type=recursive -q | xargs -r -n1 ipfs pin rm
+
+# Run garbage collection to actually reclaim disk space
+ipfs repo gc
+
+# Verify it's actually empty
+ipfs pin ls --type=recursive | wc -l    # should be 0 (or just your MFS root)
+ipfs repo stat
+
+# Restart in the background so the script can continue
+nohup ipfs daemon > "$HOME/ipfs-daemon.log" 2>&1 &
+```
+
+## Step 7: Read Data from the Ledger (Query)
 Queries execute locally and instantly against peer0.org1.
 
 ### Get All Registered Vehicles (Full Details):
@@ -250,7 +277,7 @@ peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetVehicleAuditLogs
 peer chaincode query -C mychannel -n sdvncc -c '{"function":"GetPublicSystemConfig","Args":[]}'
 ```
 
-## Step 7: Connect with NS3 Simulation:
+## Step 8: Connect with NS3 Simulation:
 *An intermediate Node.js REST API gateway is used to bridge the simulation and the blockchain.*
 
 ### Initialize the API Wallet and Admin Credentials:
@@ -283,7 +310,7 @@ tail -f /tmp/fabric-api.log
 cat /tmp/fabric-api.log
 ```
 
-## Step 8: Clean Teardown
+## Step 9: Clean Teardown
 *When you are finished testing, bring the network down gracefully.*
 
 ```bash

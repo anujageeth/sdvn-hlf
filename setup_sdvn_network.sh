@@ -113,6 +113,30 @@ peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.exa
 sleep 4
 
 echo "=========================================================="
+echo " STEP 6: Reset and Restart IPFS"
+echo "=========================================================="
+
+echo "Stopping any running IPFS daemon..."
+pkill -f "ipfs daemon" 2>/dev/null || fuser -k 5001/tcp 2>/dev/null
+sleep 1
+
+echo "Reinitializing IPFS repository..."
+rm -rf ~/.ipfs
+ipfs init
+
+echo "Unpinning recursively pinned objects and running garbage collection..."
+ipfs pin ls --type=recursive -q | xargs -r -n1 ipfs pin rm
+ipfs repo gc
+
+echo "Verifying IPFS repository is empty..."
+ipfs pin ls --type=recursive | wc -l    # should be 0 (or just your MFS root)
+ipfs repo stat
+
+echo "Restarting IPFS daemon in the background..."
+nohup ipfs daemon > "$HOME/ipfs-daemon.log" 2>&1 &
+sleep 2
+
+echo "=========================================================="
 echo " STEP 7: Connect with NS3 Simulation (Start API Gateway)"
 echo "=========================================================="
 cd $HLF_DIR/fabric-rest-api
