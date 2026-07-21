@@ -148,7 +148,10 @@ app.post('/invoke/:fcn', async (req, res) => {
         'RegisterVehicle', 
         'RegisterControllerKey', 
         'SetSystemConfig', 
-        'SeedEndorserSet'
+        'SeedEndorserSet',
+        'RegisterDkgPeer',     // must commit before first ceremony
+        'RevokeVehicle',       // eviction must be committed before rekey
+        'RecordDkgCeremony'    // ceremony record before key distribution
     ];
 
     if (syncFunctions.includes(fcn)) {

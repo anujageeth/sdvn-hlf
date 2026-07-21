@@ -65,6 +65,9 @@ type VehicleIdentity struct {
 	TReg        int64  `json:"tReg"`        // registration timestamp t_reg
 	RegSig      []byte `json:"regSig"`      // Dilithium.Sign(skD_i, pkD_i || t_reg)
 	Revoked     bool   `json:"revoked"`     // set by RevokeVehicle (Algo 4/5, tx_rev)
+	EvictTime   int64  `json:"evictTime"`   // t_evict
+	KeyVersion  int    `json:"keyVersion"`  // KG version at eviction
+	GroupKeyHash string `json:"groupKeyHash"` // base64 hash of KG^new
 }
 
 // TrustScore is the per-vehicle EMA trust value T(v_i) (Eq 3.60).
@@ -195,4 +198,37 @@ type SystemConfig struct {
 	ThetaCC float64 `json:"thetaCC"` // CC anomaly composite threshold
 	TauCtrl float64 `json:"tauCtrl"` // Minimum controller trust threshold
 	QTh     float64 `json:"qTh"`     // Minimum IPFS availability ratio
+}
+
+// ── DKG additions ─────────────────────────────────────────────────────────
+
+const (
+	DocTypeDkgPeer   = "dkgpeer"
+	DocTypeDkgRecord = "dkgrecord"
+)
+
+const (
+	prefixDkgPeer   = "dkgpeer_"
+	prefixDkgRecord = "dkgrecord_"
+)
+
+// DkgPeer is a DKG validator-node identity, registered ONCE at startup
+// (mirrors PeerRecord in ledger.h).
+type DkgPeer struct {
+	DocType           string `json:"docType"`           // "dkgpeer"
+	PeerID            int    `json:"peerId"`
+	DilithiumPK       []byte `json:"dilithiumPK"`       // ceremony auth
+	KyberPK           []byte `json:"kyberPK"`           // share encryption
+	EquivocationCount int    `json:"equivocationCount"`
+	TReg              int64  `json:"tReg"`
+}
+
+// DkgCeremonyRecord is the immutable per-ceremony record written on
+// DKG completion (replaces Ledger::WriteDkgComplete).
+type DkgCeremonyRecord struct {
+	DocType      string  `json:"docType"`      // "dkgrecord"
+	KeyVersion   int     `json:"keyVersion"`
+	GroupKeyHash string  `json:"groupKeyHash"` // base64 SHA3-256(KG^v)
+	PeerIDs      []int   `json:"peerIds"`      // participants
+	T            int64   `json:"t"`
 }

@@ -201,14 +201,24 @@ func (s *SmartContract) GetTrustScore(ctx contractapi.TransactionContextInterfac
 	return &t, nil
 }
 
-// RevokeVehicle realises tx_rev (Algorithm 4/5). It marks the identity revoked
-// and drives the trust score to zero, recording both on-chain.
-func (s *SmartContract) RevokeVehicle(ctx contractapi.TransactionContextInterface, id string, ts int64) error {
+// RevokeVehicle realises tx_rev (Algorithm 4/5). Marks the identity revoked,
+// drives trust to zero, and records the post-eviction group-key version so the
+// ledger is the audit trail for which KG^v the vehicle was excluded from.
+func (s *SmartContract) RevokeVehicle(ctx contractapi.TransactionContextInterface,
+	id string, groupKeyHashB64 string, keyVersion int, ts int64, sigB64 string) error {
+
 	v, err := s.ReadVehicle(ctx, id)
 	if err != nil {
 		return err
 	}
+	if v.Revoked {
+		return nil // idempotent — replayed revoke is not an error
+	}
+
 	v.Revoked = true
+	v.EvictTime = ts
+	v.KeyVersion = keyVersion
+	v.GroupKeyHash = groupKeyHashB64
 	if err := putJSON(ctx, prefixVehicle+id, *v); err != nil {
 		return err
 	}
@@ -953,6 +963,154 @@ func (s *SmartContract) VerifyChaincodeIntegrity(ctx contractapi.TransactionCont
 		return false, fmt.Errorf("no committed chaincode hash; call CommitChaincodeHash first (Eq 3.73)")
 	}
 	return runningHashHex == rec.HCC, nil
+}
+
+// =====================================================================================
+// DKG ceremony & peer identity (replaces Ledger:: DKG state)
+// =====================================================================================
+
+// RegisterDkgPeer registers a DKG validator identity. Called ONCE per peer at
+// startup, not per ceremony — persistent peer identity is required for
+// equivocation accounting to be meaningful across ceremonies.
+func (s *SmartContract) RegisterDkgPeer(ctx contractapi.TransactionContextInterface,
+	peerID int, dilPkB64 string, kyberPkB64 string, ts int64) error {
+
+	dilPK, err := base64.StdEncoding.DecodeString(dilPkB64)
+	if err != nil {
+		return fmt.Errorf("invalid Dilithium PK for peer %d: %w", peerID, err)
+	}
+	kyberPK, err := base64.StdEncoding.DecodeString(kyberPkB64)
+	if err != nil {
+		return fmt.Errorf("invalid Kyber PK for peer %d: %w", peerID, err)
+	}
+
+	key := prefixDkgPeer + strconv.Itoa(peerID)
+
+	// Preserve equivocation history if the peer is re-registered.
+	var existing DkgPeer
+	prior, err := getJSON(ctx, key, &existing)
+	if err != nil {
+		return err
+	}
+	eq := 0
+	if prior {
+		eq = existing.EquivocationCount
+	}
+
+	return putJSON(ctx, key, DkgPeer{
+		DocType:           DocTypeDkgPeer,
+		PeerID:            peerID,
+		DilithiumPK:       dilPK,
+		KyberPK:           kyberPK,
+		EquivocationCount: eq,
+		TReg:              ts,
+	})
+}
+
+// MarkPeerEquivocating increments the on-chain equivocation counter.
+func (s *SmartContract) MarkPeerEquivocating(ctx contractapi.TransactionContextInterface,
+	peerID int, ts int64) error {
+
+	key := prefixDkgPeer + strconv.Itoa(peerID)
+	var p DkgPeer
+	ok, err := getJSON(ctx, key, &p)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("dkg peer %d is not registered", peerID)
+	}
+	p.EquivocationCount++
+	return putJSON(ctx, key, p)
+}
+
+// IsPeerHonest reports whether the peer has zero recorded equivocations.
+func (s *SmartContract) IsPeerHonest(ctx contractapi.TransactionContextInterface,
+	peerID int) (bool, error) {
+
+	var p DkgPeer
+	ok, err := getJSON(ctx, prefixDkgPeer+strconv.Itoa(peerID), &p)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	return p.EquivocationCount == 0, nil
+}
+
+// RecordDkgCeremony writes the immutable per-ceremony completion record.
+func (s *SmartContract) RecordDkgCeremony(ctx contractapi.TransactionContextInterface,
+	keyVersion int, groupKeyHashB64 string, peerIdsJSON string, ts int64) error {
+
+	var peerIDs []int
+	if err := json.Unmarshal([]byte(peerIdsJSON), &peerIDs); err != nil {
+		return fmt.Errorf("invalid peerIds JSON: %w", err)
+	}
+
+	return putJSON(ctx, prefixDkgRecord+strconv.Itoa(keyVersion), DkgCeremonyRecord{
+		DocType:      DocTypeDkgRecord,
+		KeyVersion:   keyVersion,
+		GroupKeyHash: groupKeyHashB64,
+		PeerIDs:      peerIDs,
+		T:            ts,
+	})
+}
+
+// GetVehicleRecord returns the full VehicleIdentity as JSON (for the C++
+// bc_IsVehicleActive_real / reconciliation path).
+func (s *SmartContract) GetVehicleRecord(ctx contractapi.TransactionContextInterface,
+	id string) (string, error) {
+
+	var v VehicleIdentity
+	ok, err := getJSON(ctx, prefixVehicle+id, &v)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return `{"exists":false,"activeStatus":false}`, nil
+	}
+	// activeStatus is surfaced explicitly so the C++ side can substring-match
+	// without a JSON parser.
+	out := map[string]interface{}{
+		"exists":       true,
+		"activeStatus": !v.Revoked,
+		"id":           v.ID,
+		"tReg":         v.TReg,
+		"revoked":      v.Revoked,
+		"evictTime":    v.EvictTime,
+		"keyVersion":   v.KeyVersion,
+	}
+	b, err := json.Marshal(out)
+	return string(b), err
+}
+
+// GetVehicleHistory wraps GetHistoryForKey — Fabric's own immutable audit trail,
+// replacing Ledger's locally-maintained m_txLog.
+func (s *SmartContract) GetVehicleHistory(ctx contractapi.TransactionContextInterface,
+	id string) (string, error) {
+
+	iter, err := ctx.GetStub().GetHistoryForKey(prefixVehicle + id)
+	if err != nil {
+		return "", err
+	}
+	defer iter.Close()
+
+	var entries []map[string]interface{}
+	for iter.HasNext() {
+		r, err := iter.Next()
+		if err != nil {
+			return "", err
+		}
+		entries = append(entries, map[string]interface{}{
+			"txId":      r.TxId,
+			"timestamp": r.Timestamp.Seconds,
+			"isDelete":  r.IsDelete,
+			"value":     string(r.Value),
+		})
+	}
+	b, err := json.Marshal(entries)
+	return string(b), err
 }
 
 // =====================================================================================
