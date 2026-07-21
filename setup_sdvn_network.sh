@@ -117,7 +117,8 @@ echo " STEP 6: Reset and Restart IPFS"
 echo "=========================================================="
 
 echo "Stopping any running IPFS daemon..."
-pkill -f "ipfs daemon" 2>/dev/null || fuser -k 5001/tcp 2>/dev/null
+pkill -f "ipfs daemon" 2>/dev/null || true
+fuser -k 5001/tcp 2>/dev/null || true
 sleep 1
 
 echo "Reinitializing IPFS repository..."
