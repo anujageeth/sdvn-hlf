@@ -198,6 +198,16 @@ type SystemConfig struct {
 	ThetaCC float64 `json:"thetaCC"` // CC anomaly composite threshold
 	TauCtrl float64 `json:"tauCtrl"` // Minimum controller trust threshold
 	QTh     float64 `json:"qTh"`     // Minimum IPFS availability ratio
+	TauRemove float64 `json:"tauRemove"` // Threshold for permanent peer removal (Eq 3.68)
+}
+
+// PeerTrust is the per-peer trust score tau_i (Eq 3.67) plus the isolation state
+type PeerTrust struct {
+	DocType string  `json:"docType"` // "peertrust"
+	PeerID  int     `json:"peerId"`
+	Score   float64 `json:"score"`   // \tau_i (Eq 3.67)
+	State   string  `json:"state"`   // ACTIVE, QUARANTINED, REMOVED (Eq 3.68)
+	Updated int64   `json:"updated"`
 }
 
 // ── DKG additions ─────────────────────────────────────────────────────────

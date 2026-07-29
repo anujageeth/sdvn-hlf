@@ -952,7 +952,7 @@ func (s *SmartContract) CommitChaincodeHash(ctx contractapi.TransactionContextIn
 // must be excluded from the endorsement quorum until re-verified. Returns true
 // iff the running-code hash matches the committed H_CC.
 func (s *SmartContract) VerifyChaincodeIntegrity(ctx contractapi.TransactionContextInterface,
-	runningHashHex string) (bool, error) {
+	peerID int, runningHashHex string, lambda float64, ts int64) (bool, error) {
 
 	var rec ChaincodeHash
 	ok, err := getJSON(ctx, singletonCChash, &rec)
@@ -960,9 +960,19 @@ func (s *SmartContract) VerifyChaincodeIntegrity(ctx contractapi.TransactionCont
 		return false, err
 	}
 	if !ok {
-		return false, fmt.Errorf("no committed chaincode hash; call CommitChaincodeHash first (Eq 3.73)")
+		return false, fmt.Errorf("no committed chaincode hash")
 	}
-	return runningHashHex == rec.HCC, nil
+	
+	// V_CC = 1 if match, 0 otherwise
+	vCC := (runningHashHex == rec.HCC)
+	
+	// Trigger the peer trust update automatically (Eq 3.67)
+	err = s.UpdatePeerTrustScore(ctx, peerID, lambda, vCC, ts)
+	if err != nil {
+		return false, fmt.Errorf("failed to update peer trust: %w", err)
+	}
+
+	return vCC, nil
 }
 
 // =====================================================================================
@@ -1114,6 +1124,66 @@ func (s *SmartContract) GetVehicleHistory(ctx contractapi.TransactionContextInte
 }
 
 // =====================================================================================
+// Peer Trust
+// =====================================================================================
+
+const (
+	PeerStateActive      = "ACTIVE"
+	PeerStateQuarantined = "QUARANTINED"
+	PeerStateRemoved     = "REMOVED"
+)
+
+// UpdatePeerTrustScore realises Eq 3.67 and the lifecycle transitions of Eq 3.68
+func (s *SmartContract) UpdatePeerTrustScore(ctx contractapi.TransactionContextInterface,
+	peerID int, lambda float64, vCC bool, ts int64) error {
+
+	cfg, err := s.getSystemConfig(ctx)
+	if err != nil { return err }
+
+	key := "peertrust_" + strconv.Itoa(peerID)
+	var pt PeerTrust
+	ok, err := getJSON(ctx, key, &pt)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		// Initialize new peer as ACTIVE with neutral trust
+		pt = PeerTrust{
+			DocType: DocTypeDkgPeer, // Align with your prefixes
+			PeerID:  peerID,
+			Score:   neutralTrust,
+			State:   PeerStateActive,
+		}
+	}
+
+	// Once REMOVED, a peer cannot be re-evaluated (Eq 3.68)
+	if pt.State == PeerStateRemoved {
+		return nil 
+	}
+
+	// Eq 3.67: \tau_i^{(t+1)} = \lambda \tau_i^{(t)} + (1-\lambda) * V_CC
+	indicator := 0.0
+	if vCC {
+		indicator = 1.0
+	}
+	pt.Score = lambda*pt.Score + (1-lambda)*indicator
+	pt.Updated = ts
+
+	// Eq 3.68: Lifecycle Transitions
+	if pt.State == PeerStateActive && pt.Score < cfg.TauMin {
+		pt.State = PeerStateQuarantined
+	} else if pt.State == PeerStateQuarantined {
+		if pt.Score >= cfg.TauMin {
+			pt.State = PeerStateActive
+		} else if pt.Score < cfg.TauRemove {
+			pt.State = PeerStateRemoved
+		}
+	}
+
+	return putJSON(ctx, key, pt)
+}
+
+// =====================================================================================
 // Read-only helpers
 // =====================================================================================
 
@@ -1260,7 +1330,7 @@ func prefixRangeEnd(prefix string) string {
 // SetSystemConfig establishes the global security thresholds. This must be invoked 
 // by the network administrators under the EP(tx)=T policy.
 func (s *SmartContract) SetSystemConfig(ctx contractapi.TransactionContextInterface,
-	tauMin, thetaCC, tauCtrl, qTh float64) error {
+	tauMin, thetaCC, tauCtrl, qTh, tauRemove float64) error {
 	
 	cfg := SystemConfig{
 		DocType: DocTypeSysConfig,
@@ -1268,6 +1338,7 @@ func (s *SmartContract) SetSystemConfig(ctx contractapi.TransactionContextInterf
 		ThetaCC: thetaCC,
 		TauCtrl: tauCtrl,
 		QTh:     qTh,
+		TauRemove: tauRemove,
 	}
 	return putJSON(ctx, singletonSysConfig, cfg)
 }
