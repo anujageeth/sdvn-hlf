@@ -7,18 +7,18 @@ package chaincode
 import (
 	"testing"
 
-	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 	"github.com/stretchr/testify/require"
 )
 
 // TestDilithiumVerify checks that DilithiumVerify (Eq 3.45) accepts a genuine
-// ML-DSA-65 signature and rejects a tampered message and a malformed key.
+// ML-DSA-87 signature and rejects a tampered message and a malformed key.
 //
 // It uses circl's stable sign.Scheme interface to generate keys and sign, then
 // feeds the marshalled public key to DilithiumVerify exactly as the application
 // plane would.
 func TestDilithiumVerify(t *testing.T) {
-	scheme := mldsa65.Scheme()
+	scheme := mldsa87.Scheme()
 	pk, sk, err := scheme.GenerateKey()
 	require.NoError(t, err)
 

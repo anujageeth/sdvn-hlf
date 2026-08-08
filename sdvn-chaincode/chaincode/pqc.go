@@ -12,8 +12,14 @@ therefore safe to run on every endorsing peer. Key generation, Kyber (ML-KEM)
 encapsulation and the Kyber-LKH re-key tree are performed off-chain by the
 application plane; the chaincode only ever stores the resulting CIDs/hashes.
 
-We use cloudflare/circl's ML-DSA-65 implementation, the FIPS 204 standardised
-successor to Dilithium mode-3, matching the paper's FIPS 203/204 requirement.
+We use cloudflare/circl's ML-DSA-87 implementation, the FIPS 204 standardised
+successor to Dilithium mode-5 (NIST Level 5). This MUST match the algorithm
+the application plane actually signs with: DCA.cc's registration path
+(register_vehicle_staggered / init_pqc_crypto) mints per-vehicle identity
+keypairs via liboqs's OQS_SIG_alg_ml_dsa_87 and signs (pkD_i || tReg) with
+that key before calling RegisterVehicle. A prior ML-DSA-65 verifier here
+rejected every genuine ML-DSA-87 signature/key (wrong size and content),
+which surfaced as "invalid registration signature" for every vehicle.
 */
 
 package chaincode
@@ -21,7 +27,7 @@ package chaincode
 import (
 	"encoding/hex"
 
-	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -39,18 +45,18 @@ func SHA3Hex(data []byte) string {
 
 // DilithiumVerify realizes Dilithium.Verify(pk, msg, sig) (Eq 3.45).
 //
-// It returns true iff sig is a valid ML-DSA-65 signature over msg under the
+// It returns true iff sig is a valid ML-DSA-87 signature over msg under the
 // public key encoded in pkBytes. An empty context string is used, matching the
 // vehicle/controller signing convention in the application plane. Any decode
 // failure is treated as a verification failure (never panics on-chain).
 func DilithiumVerify(pkBytes, msg, sig []byte) bool {
-	if len(pkBytes) != mldsa65.PublicKeySize || len(sig) != mldsa65.SignatureSize {
+	if len(pkBytes) != mldsa87.PublicKeySize || len(sig) != mldsa87.SignatureSize {
 		return false
 	}
-	var pk mldsa65.PublicKey
+	var pk mldsa87.PublicKey
 	if err := pk.UnmarshalBinary(pkBytes); err != nil {
 		return false
 	}
-	// ctx is empty; mldsa65.Verify(pk, msg, ctx, sig).
-	return mldsa65.Verify(&pk, msg, nil, sig)
+	// ctx is empty; mldsa87.Verify(pk, msg, ctx, sig).
+	return mldsa87.Verify(&pk, msg, nil, sig)
 }
